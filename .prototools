@@ -1,4 +1,6 @@
+cue = "=0.16.1"
 golangci-lint = "=2.11.4"
 
 [plugins.tools]
+cue = "file://.moon/proto/cue.toml"
 golangci-lint = "file://.moon/proto/golangci-lint.toml"

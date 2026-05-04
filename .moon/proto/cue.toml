@@ -1,0 +1,24 @@
+name = "cue"
+type = "cli"
+
+[platform.macos]
+download-file = "cue_v{version}_darwin_{arch}.tar.gz"
+exe-path = "cue"
+
+[platform.linux]
+download-file = "cue_v{version}_linux_{arch}.tar.gz"
+exe-path = "cue"
+
+[platform.windows]
+download-file = "cue_v{version}_windows_{arch}.zip"
+exe-path = "cue.exe"
+
+[install]
+download-url = "https://github.com/cue-lang/cue/releases/download/v{version}/{download_file}"
+
+[install.arch]
+aarch64 = "arm64"
+x86_64 = "amd64"
+
+[resolve]
+git-url = "https://github.com/cue-lang/cue"
