@@ -1,16 +1,21 @@
 ---
-title: PROJECT_NAME Docs
+title: imgcli Docs
 slug: /
-description: Starting point for PROJECT_NAME documentation.
+description: Documentation for imgcli.
 ---
 
-# PROJECT_NAME Docs
+# imgcli Docs
 
-This site is the starting point for `PROJECT_NAME` documentation.
+`imgcli` is a prototype CLI for building disk image artifacts from Git-tracked
+CUE configuration and, later, publishing those artifacts to `imgsrv`.
 
-Replace this page with:
+The project is intentionally early. Start with the
+[initial design](./design.md), which captures the current product boundary,
+prototype scope, configuration direction, and planned command set.
 
-- `PROJECT_SUMMARY`
-- `QUICKSTART_STEPS`
-- `GUIDES_AND_REFERENCE_LINKS`
-- `SUPPORT_AND_CONTACT_PATHS`
+## Current Status
+
+- No installable CLI binary has been published yet.
+- The first prototype target is a local-only IncusOS artifact path.
+- Publishing will target `imgsrv` once its API is stable enough to drive
+  against.

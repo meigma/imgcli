@@ -1,3 +1,8 @@
+---
+title: Initial Design
+description: Temporary working design for the imgcli prototype.
+---
+
 # imgcli Initial Design
 
 `imgcli` is a CLI for building disk image artifacts from Git-tracked
