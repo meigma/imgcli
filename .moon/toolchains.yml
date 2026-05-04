@@ -7,8 +7,12 @@ javascript:
 
 npm: {}
 
+proto:
+  version: '0.56.4'
+
 node:
   version: '22.22.2'
   syncVersionManagerConfig: 'nvm'
 
-# Add the Go toolchain when the CLI implementation lands.
+go:
+  version: '1.26.2'

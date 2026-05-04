@@ -5,8 +5,8 @@ description: Temporary working design for the imgcli prototype.
 
 # imgcli Initial Design
 
-`imgcli` is a CLI for building disk image artifacts from Git-tracked
-configuration and, eventually, publishing those artifacts to `imgsrv`.
+`imgcli` is a CLI for building disk image artifacts from CUE configuration and,
+eventually, publishing those artifacts to `imgsrv`.
 
 This document is intentionally a starting point for prototype work. It captures
 the shared product shape and the first schema direction, but it does not attempt
@@ -35,7 +35,7 @@ image versions, uploaded blobs, release artifacts, artifact attachments,
 publishing, aliases, downloads, and future materializations.
 
 The CLI should not know about downstream tools such as Tinkerbell, CAPI, CAPN,
-Incus, or GitOps controllers. Those tools are consumers of the artifacts and
+Incus, or deployment automation. Those tools are consumers of the artifacts and
 server APIs, not concepts in `imgcli`.
 
 ## V0 Prototype Scope
@@ -58,13 +58,13 @@ The initial prototype should not implement Incus/simplestreams materialization,
 generated Incus metadata attachments, or provider schemas for Talos, Flatcar, or
 distrobuilder.
 
-## GitOps Workflow
+## Release Pipeline Workflow
 
-The intended workflow is Git-as-truth image publishing:
+One intended workflow is release-pipeline image publishing:
 
 1. Create one image configuration file.
-2. Commit and push it.
-3. Create a Git tag.
+2. Commit and push it if the configuration is managed in source control.
+3. Create a release tag or otherwise select an explicit release version.
 4. Run `imgcli` in a release pipeline with an explicit version.
 
 For example:
@@ -75,7 +75,7 @@ imgcli publish --version 1.0.0 --alias latest --alias prod config.cue
 
 The configuration file should encode the desired image state, but it should not
 hard-code the release version. Version identity comes from the release pipeline,
-usually through the Git tag and an explicit `--version` flag.
+usually through an explicit `--version` flag.
 
 Aliases are also publish-time intent. An alias is a mutable relationship from a
 text label to a published version, so it should be supplied during publish
@@ -381,7 +381,7 @@ For `imgsrv` integration, `imgcli` should need only client connection details:
 - API token
 
 Those values belong in CLI flags, environment variables, or CI secrets, not in
-the Git-tracked image config.
+the image config.
 
 The concrete publish protocol belongs to `imgsrv`. `imgcli` should follow the
 server API once it exists rather than designing a separate publishing workflow.

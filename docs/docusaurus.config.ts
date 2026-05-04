@@ -4,7 +4,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
   title: 'imgcli',
-  tagline: 'Build disk image artifacts from Git-tracked configuration',
+  tagline: 'Build disk image artifacts from configuration',
   future: {
     v4: true,
   },
