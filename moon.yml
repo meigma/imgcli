@@ -25,6 +25,16 @@ fileGroups:
   go-sources:
     - 'cmd/**/*.go'
     - 'internal/**/*.go'
+  schema-config:
+    - '.prototools'
+    - '.moon/proto/cue.toml'
+    - 'schemas/go.mod'
+    - 'schemas/go.sum'
+    - 'schemas/cue.mod/**/*.cue'
+  schema-go-sources:
+    - 'schemas/**/*.go'
+  schema-sources:
+    - 'schemas/**/*.cue'
   lint-config:
     - '.golangci.yml'
     - '.prototools'
@@ -67,12 +77,61 @@ tasks:
       - '@group(go-config)'
       - '@group(go-sources)'
 
+  schemas-mod-check:
+    script: 'cd schemas && proto run cue -- mod tidy --check'
+    inputs:
+      - '@group(schema-config)'
+      - '@group(schema-sources)'
+    options:
+      cache: false
+
+  schemas-vet:
+    script: 'cd schemas && proto run cue -- vet -c=false ./...'
+    inputs:
+      - '@group(schema-config)'
+      - '@group(schema-sources)'
+    options:
+      cache: false
+
+  schemas-generate:
+    script: 'cd schemas && proto run cue -- exp gengotypes ./... && gofmt -w $(find . -name "*.go" -type f)'
+    inputs:
+      - '@group(schema-config)'
+      - '@group(schema-sources)'
+    outputs:
+      - 'schemas/**/*.go'
+    options:
+      cache: false
+
+  schemas-generate-check:
+    script: 'cd schemas && proto run cue -- exp gengotypes ./... && gofmt -w $(find . -name "*.go" -type f) && git -C .. diff --exit-code -- "schemas/**/*.go"'
+    inputs:
+      - '@group(schema-config)'
+      - '@group(schema-sources)'
+      - '@group(schema-go-sources)'
+    options:
+      cache: false
+
+  schemas-test:
+    deps:
+      - 'root:schemas-generate-check'
+    script: 'cd schemas && go test ./...'
+    toolchains: ['go']
+    inputs:
+      - '@group(schema-config)'
+      - '@group(schema-go-sources)'
+    options:
+      cache: false
+
   check:
     deps:
       - 'root:format'
       - 'root:lint'
       - 'root:build'
       - 'root:test'
+      - 'root:schemas-mod-check'
+      - 'root:schemas-vet'
+      - 'root:schemas-test'
     options:
       cache: false
       runInCI: true
