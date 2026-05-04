@@ -6,8 +6,8 @@ description: Documentation for imgcli.
 
 # imgcli Docs
 
-`imgcli` is a prototype CLI for building disk image artifacts from Git-tracked
-CUE configuration and, later, publishing those artifacts to `imgsrv`.
+`imgcli` is a prototype CLI for building disk image artifacts from CUE
+configuration and, later, publishing those artifacts to `imgsrv`.
 
 The project is intentionally early. Start with the
 [initial design](./design.md), which captures the current product boundary,

@@ -1,8 +1,12 @@
+language: 'go'
 layer: 'application'
+tags:
+  - 'cli'
+  - 'go'
 
 project:
   title: 'imgcli'
-  description: 'CLI for building disk image artifacts from Git-tracked configuration.'
+  description: 'CLI for building disk image artifacts from configuration.'
   owner: 'meigma'
   maintainers:
     - 'meigma'
@@ -11,20 +15,64 @@ workspace:
   inheritedTasks:
     include: []
 
-# Add repository-wide maintenance tasks here as imgcli grows.
-# Examples:
-#
-# tasks:
-#   format:
-#     command: 'prettier --check .'
-#     toolchains: ['javascript', 'node', 'npm']
-#     inputs: []
-#     options:
-#       cache: false
-#
-#   docs-build:
-#     command: 'moon run docs:build'
-#     toolchains: 'system'
-#     inputs: []
-#     options:
-#       cache: false
+toolchains:
+  default: 'go'
+
+fileGroups:
+  go-config:
+    - 'go.mod'
+    - 'go.sum'
+  go-sources:
+    - 'cmd/**/*.go'
+    - 'internal/**/*.go'
+  lint-config:
+    - '.golangci.yml'
+    - '.prototools'
+    - '.moon/proto/golangci-lint.toml'
+
+tasks:
+  build:
+    command: 'go build -o bin/imgcli ./cmd/imgcli'
+    toolchains: ['go']
+    inputs:
+      - '@group(go-config)'
+      - '@group(go-sources)'
+    outputs:
+      - 'bin/imgcli'
+
+  format:
+    command: 'proto run golangci-lint -- fmt --config .golangci.yml --diff'
+    toolchains: ['go']
+    inputs:
+      - '@group(go-config)'
+      - '@group(go-sources)'
+      - '@group(lint-config)'
+    options:
+      cache: false
+
+  lint:
+    command: 'proto run golangci-lint -- run --config .golangci.yml ./... --show-stats=false'
+    toolchains: ['go']
+    inputs:
+      - '@group(go-config)'
+      - '@group(go-sources)'
+      - '@group(lint-config)'
+    options:
+      cache: false
+
+  test:
+    command: 'go test ./...'
+    toolchains: ['go']
+    inputs:
+      - '@group(go-config)'
+      - '@group(go-sources)'
+
+  check:
+    deps:
+      - 'root:format'
+      - 'root:lint'
+      - 'root:build'
+      - 'root:test'
+    options:
+      cache: false
+      runInCI: true

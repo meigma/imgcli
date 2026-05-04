@@ -1,7 +1,7 @@
 # imgcli
 
-`imgcli` is a prototype CLI for building disk image artifacts from Git-tracked
-CUE configuration and, later, publishing those artifacts to `imgsrv`.
+`imgcli` is a prototype CLI for building disk image artifacts from CUE
+configuration and, later, publishing those artifacts to `imgsrv`.
 
 The repository is still in the design and scaffolding stage. The current working
 design is intentionally lightweight and lives in [docs/docs/design.md](docs/docs/design.md).
@@ -32,7 +32,7 @@ npm --prefix docs run start
 
 ## Usage
 
-The intended CLI workflow is Git-as-truth image publishing:
+One intended release-pipeline workflow is image publishing:
 
 ```sh
 imgcli publish --version 1.0.0 --alias latest --alias prod config.cue
@@ -48,8 +48,8 @@ publishing once the `imgsrv` API is stable enough to target.
 artifact work, and write deterministic local outputs under `dist/` by default.
 
 Release versions and aliases are publish-time inputs. They should come from the
-release pipeline, usually a Git tag plus explicit CLI flags, rather than being
-hard-coded into the CUE file.
+release pipeline, usually a release tag plus explicit CLI flags, rather than
+being hard-coded into the CUE file.
 
 ## Documentation
 
