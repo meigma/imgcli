@@ -2,6 +2,12 @@
 .moon/cache/
 .moon/docker/
 
+# Agent protocol
+.agents/
+.claude/
+.journal/
+.wt/
+
 # Environment
 .env
 .env.*
