@@ -1,17 +1,17 @@
-layer: 'scaffolding'
+layer: 'application'
 
 project:
-  title: 'Repository template'
-  description: 'Workspace-level configuration, shared automation, and template defaults.'
-  owner: 'REPLACE_ME_OWNER'
+  title: 'imgcli'
+  description: 'CLI for building disk image artifacts from Git-tracked configuration.'
+  owner: 'meigma'
   maintainers:
-    - 'REPLACE_ME_MAINTAINER'
+    - 'meigma'
 
 workspace:
   inheritedTasks:
     include: []
 
-# Add repository-wide maintenance tasks here as the template grows.
+# Add repository-wide maintenance tasks here as imgcli grows.
 # Examples:
 #
 # tasks:

@@ -1,15 +1,13 @@
 # GitHub repository settings managed by scripts/configure_github_repo.py.
 #
 # Run:
-#   uv run scripts/configure_github_repo.py plan --repo OWNER/REPO
-#   uv run scripts/configure_github_repo.py apply --repo OWNER/REPO
+#   uv run scripts/configure_github_repo.py plan --repo meigma/imgcli
+#   uv run scripts/configure_github_repo.py apply --repo meigma/imgcli
 #
 # Notes:
 # - Supported settings are applied directly through the GitHub REST API.
 # - Unsupported settings stay in this file so the script can report manual follow-ups.
 # - The branch ruleset follows the repository default branch via ~DEFAULT_BRANCH.
-# - Status checks are enabled in the screenshots, but the actual contexts are repository-specific.
-#   Fill them in before expecting the status-check rules to be applied.
 
 [repository]
 default_branch = "master"
@@ -72,7 +70,7 @@ enabled = true
 strict_required_status_checks_policy = false
 do_not_enforce_on_create = false
 contexts = [
-  # "ci / build",
+  "ci",
 ]
 
 [rulesets.tags_default]
@@ -92,12 +90,10 @@ bypass = [
 ]
 
 [rulesets.tags_default.status_checks]
-enabled = true
+enabled = false
 strict_required_status_checks_policy = false
 do_not_enforce_on_create = false
-contexts = [
-  # "release / verify",
-]
+contexts = []
 
 [unsupported]
 # GitHub Archive Program
