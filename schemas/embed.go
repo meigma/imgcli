@@ -20,7 +20,7 @@ const (
 	embeddedModuleDir = "imgcli-schemas-embedded"
 )
 
-//go:embed cue.mod/module.cue *.cue core/*.cue providers/*/*.cue
+//go:embed cue.mod/module.cue cue.mod/gen *.cue core/*.cue providers/*/*.cue
 var embeddedModule embed.FS
 
 // ModuleFS returns the embedded CUE module files.

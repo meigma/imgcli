@@ -44,6 +44,8 @@ fileGroups:
 
 tasks:
   build:
+    deps:
+      - 'root:schemas-generate-check'
     command: 'go build -o bin/imgcli ./cmd/imgcli'
     toolchains: ['go']
     inputs:
@@ -63,6 +65,8 @@ tasks:
       cache: false
 
   lint:
+    deps:
+      - 'root:schemas-generate-check'
     command: 'proto run golangci-lint -- run --config .golangci.yml ./... --show-stats=false'
     toolchains: ['go']
     inputs:
@@ -73,6 +77,8 @@ tasks:
       cache: false
 
   test:
+    deps:
+      - 'root:schemas-generate-check'
     command: 'go test ./...'
     toolchains: ['go']
     inputs:
@@ -96,7 +102,7 @@ tasks:
       cache: false
 
   schemas-generate:
-    script: 'cd schemas && proto run cue -- exp gengotypes ./... && gofmt -w $(find . -name "*.go" -type f)'
+    script: 'cd schemas && proto run cue -- exp gengotypes . ./core ./providers/... && find cue.mod/gen -name "*.go" -type f -delete && gofmt -w $(find . -path ./cue.mod -prune -o -name "*.go" -type f -print)'
     inputs:
       - '@group(schema-config)'
       - '@group(schema-sources)'
@@ -106,7 +112,7 @@ tasks:
       cache: false
 
   schemas-generate-check:
-    script: 'cd schemas && proto run cue -- exp gengotypes ./... && gofmt -w $(find . -name "*.go" -type f) && git -C .. diff --exit-code -- "schemas/**/*.go"'
+    script: 'cd schemas && proto run cue -- exp gengotypes . ./core ./providers/... && find cue.mod/gen -name "*.go" -type f -delete && gofmt -w $(find . -path ./cue.mod -prune -o -name "*.go" -type f -print) && git -C .. diff --exit-code -- "schemas/**/*.go"'
     inputs:
       - '@group(schema-config)'
       - '@group(schema-sources)'
