@@ -12,3 +12,11 @@ packages:
       structname: MockService
     interfaces:
       Service:
+  github.com/meigma/imgcli/internal/publish:
+    config:
+      dir: internal/publish/mocks
+      filename: uploads_client.go
+      pkgname: mocks
+      structname: MockUploadsClient
+    interfaces:
+      UploadsClient:

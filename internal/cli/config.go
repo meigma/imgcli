@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -29,6 +30,18 @@ const (
 	KeyCacheDir = "cache.dir"
 	// KeyCacheMaxSize is the Viper key for the maximum cache size before LRU pruning.
 	KeyCacheMaxSize = "cache.max-size"
+	// KeyImgsrvURL is the Viper key for the imgsrv API base URL used by publish.
+	KeyImgsrvURL = "imgsrv.url"
+	// KeyImgsrvToken is the Viper key for the optional imgsrv bearer token used by publish.
+	KeyImgsrvToken = "imgsrv.token" // #nosec G101 -- config key name, not a credential value.
+	// KeyPublishPartSize is the Viper key for the publish multipart upload part size.
+	KeyPublishPartSize = "publish.part-size"
+	// KeyPublishWait is the Viper key for waiting until uploaded blobs become CAS-ready.
+	KeyPublishWait = "publish.wait"
+	// KeyPublishTimeout is the Viper key for the publish wait timeout.
+	KeyPublishTimeout = "publish.timeout"
+	// KeyPublishPollInterval is the Viper key for the publish wait poll interval.
+	KeyPublishPollInterval = "publish.poll-interval"
 )
 
 const (
@@ -38,18 +51,31 @@ const (
 	flagNoColor      = "no-color"
 	flagCacheDir     = "cache-dir"
 	flagCacheMaxSize = "cache-max-size"
+
+	flagImgsrvURL           = "imgsrv-url"
+	flagImgsrvToken         = "imgsrv-token" // #nosec G101 -- flag name, not a credential value.
+	flagPublishPartSize     = "publish-part-size"
+	flagPublishWait         = "publish-wait"
+	flagPublishTimeout      = "publish-timeout"
+	flagPublishPollInterval = "publish-poll-interval"
 )
 
 const (
-	defaultConfigDirName  = "imgcli"
-	defaultConfigFileName = "config.yaml"
-	defaultLogLevel       = "info"
-	defaultLogFormat      = "text"
-	defaultCacheMaxSize   = "10GB"
+	defaultConfigDirName       = "imgcli"
+	defaultConfigFileName      = "config.yaml"
+	defaultLogLevel            = "info"
+	defaultLogFormat           = "text"
+	defaultCacheMaxSize        = "10GB"
+	defaultPublishPartSize     = "64MB"
+	defaultPublishTimeout      = "10m"
+	defaultPublishPollInterval = "2s"
 
 	cacheSizeKiBShift = 10
 	cacheSizeMiBShift = 20
 	cacheSizeGiBShift = 30
+
+	minPublishPartSizeBytes = int64(5 * (1 << cacheSizeMiBShift))
+	maxPublishPartSizeBytes = int64(5 * (1 << cacheSizeGiBShift))
 )
 
 // Config is the CLI edge configuration resolved from flags, environment, config file, and defaults.
@@ -73,6 +99,15 @@ type Config struct {
 	CacheMaxSizeBytes int64
 }
 
+type publishConfig struct {
+	imgsrvURL     string
+	imgsrvToken   string
+	partSizeBytes int64
+	wait          bool
+	timeout       time.Duration
+	pollInterval  time.Duration
+}
+
 func configureViper(vp *viper.Viper) {
 	vp.SetEnvPrefix(envPrefix)
 	vp.SetEnvKeyReplacer(strings.NewReplacer("-", "_", ".", "_"))
@@ -83,6 +118,12 @@ func configureViper(vp *viper.Viper) {
 	vp.SetDefault(KeyNoColor, false)
 	vp.SetDefault(KeyCacheDir, "")
 	vp.SetDefault(KeyCacheMaxSize, defaultCacheMaxSize)
+	vp.SetDefault(KeyImgsrvURL, "")
+	vp.SetDefault(KeyImgsrvToken, "")
+	vp.SetDefault(KeyPublishPartSize, defaultPublishPartSize)
+	vp.SetDefault(KeyPublishWait, true)
+	vp.SetDefault(KeyPublishTimeout, defaultPublishTimeout)
+	vp.SetDefault(KeyPublishPollInterval, defaultPublishPollInterval)
 }
 
 func (rt *runtime) registerGlobalFlags(root *cobra.Command) error {
@@ -232,6 +273,52 @@ func parseSizeConfig(vp *viper.Viper, key string) (int64, error) {
 	return int64(size), nil
 }
 
+func loadPublishConfig(vp *viper.Viper) (publishConfig, error) {
+	partSizeBytes, err := parseSizeConfig(vp, KeyPublishPartSize)
+	if err != nil {
+		return publishConfig{}, err
+	}
+	timeout, err := parseDurationConfig(vp, KeyPublishTimeout)
+	if err != nil {
+		return publishConfig{}, err
+	}
+	pollInterval, err := parseDurationConfig(vp, KeyPublishPollInterval)
+	if err != nil {
+		return publishConfig{}, err
+	}
+
+	cfg := publishConfig{
+		imgsrvURL:     strings.TrimSpace(vp.GetString(KeyImgsrvURL)),
+		imgsrvToken:   strings.TrimSpace(vp.GetString(KeyImgsrvToken)),
+		partSizeBytes: partSizeBytes,
+		wait:          vp.GetBool(KeyPublishWait),
+		timeout:       timeout,
+		pollInterval:  pollInterval,
+	}
+	if err := validatePublishConfig(cfg); err != nil {
+		return publishConfig{}, err
+	}
+
+	return cfg, nil
+}
+
+func parseDurationConfig(vp *viper.Viper, key string) (time.Duration, error) {
+	raw := strings.TrimSpace(vp.GetString(key))
+	if raw == "" {
+		return 0, fmt.Errorf("invalid %s %q: duration is required", key, raw)
+	}
+
+	duration, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", key, raw, err)
+	}
+	if duration <= 0 {
+		return 0, fmt.Errorf("invalid %s %q: duration must be positive", key, raw)
+	}
+
+	return duration, nil
+}
+
 func parseSizeLiteral(raw string) (int64, error) {
 	if raw == "" {
 		return 0, errors.New("size is required")
@@ -278,4 +365,41 @@ func validateConfig(cfg Config) error {
 		return err
 	}
 	return nil
+}
+
+func validatePublishConfig(cfg publishConfig) error {
+	if cfg.imgsrvURL == "" {
+		return errors.New("publish requires imgsrv.url: set --imgsrv-url, IMGCLI_IMGSRV_URL, or config imgsrv.url")
+	}
+	if cfg.partSizeBytes < minPublishPartSizeBytes {
+		return fmt.Errorf(
+			"invalid %s %q: must be at least %s",
+			KeyPublishPartSize,
+			viperValueForError(cfg.partSizeBytes),
+			defaultSizeForError(minPublishPartSizeBytes),
+		)
+	}
+	if cfg.partSizeBytes > maxPublishPartSizeBytes {
+		return fmt.Errorf(
+			"invalid %s %q: must be at most %s",
+			KeyPublishPartSize,
+			viperValueForError(cfg.partSizeBytes),
+			defaultSizeForError(maxPublishPartSizeBytes),
+		)
+	}
+	return nil
+}
+
+func viperValueForError(value int64) string {
+	return strconv.FormatInt(value, 10)
+}
+
+func defaultSizeForError(value int64) string {
+	if value%(1<<cacheSizeGiBShift) == 0 {
+		return strconv.FormatInt(value/(1<<cacheSizeGiBShift), 10) + "GB"
+	}
+	if value%(1<<cacheSizeMiBShift) == 0 {
+		return strconv.FormatInt(value/(1<<cacheSizeMiBShift), 10) + "MB"
+	}
+	return strconv.FormatInt(value, 10) + "B"
 }

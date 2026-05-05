@@ -30,24 +30,12 @@ func newBuildCommand(rt *runtime) *cobra.Command {
 				return err
 			}
 
-			if rt.usesDefaultIncusOSCache() {
-				return withLockedCache(cmd.Context(), rt.config, func(
-					catalog incusosprovider.Catalog,
-					downloader incusosprovider.Downloader,
-				) error {
-					ports, portsErr := rt.incusOSBuildPorts(catalog, downloader)
-					if portsErr != nil {
-						return portsErr
-					}
-					return runIncusOSBuild(cmd.Context(), config, ports, rt.opts.stdout())
-				})
-			}
-
-			ports, err := rt.incusOSBuildPorts(nil, nil)
+			result, err := rt.runIncusOSBuild(cmd.Context(), config)
 			if err != nil {
 				return err
 			}
-			return runIncusOSBuild(cmd.Context(), config, ports, rt.opts.stdout())
+
+			return printBuildArtifacts(rt.opts.stdout(), result)
 		},
 	}
 }
@@ -101,12 +89,47 @@ func (rt *runtime) incusOSBuildPorts(
 	return ports, nil
 }
 
+func (rt *runtime) runIncusOSBuild(
+	ctx context.Context,
+	config imgschemas.Config,
+) (providers.BuildResult, error) {
+	if rt.usesDefaultIncusOSCache() {
+		var result providers.BuildResult
+		err := withLockedCache(ctx, rt.config, func(
+			catalog incusosprovider.Catalog,
+			downloader incusosprovider.Downloader,
+		) error {
+			ports, portsErr := rt.incusOSBuildPorts(catalog, downloader)
+			if portsErr != nil {
+				return portsErr
+			}
+
+			buildResult, buildErr := runIncusOSBuild(ctx, config, ports)
+			if buildErr != nil {
+				return buildErr
+			}
+			result = buildResult
+			return nil
+		})
+		if err != nil {
+			return providers.BuildResult{}, err
+		}
+
+		return result, nil
+	}
+
+	ports, err := rt.incusOSBuildPorts(nil, nil)
+	if err != nil {
+		return providers.BuildResult{}, err
+	}
+	return runIncusOSBuild(ctx, config, ports)
+}
+
 func runIncusOSBuild(
 	ctx context.Context,
 	config imgschemas.Config,
 	ports incusOSBuildPorts,
-	output io.Writer,
-) error {
+) (providers.BuildResult, error) {
 	provider := incusosprovider.New(*config.Incusos, incusosprovider.Options{
 		Catalog:       ports.catalog,
 		Downloader:    ports.downloader,
@@ -121,9 +144,13 @@ func runIncusOSBuild(
 		OutputDir: buildOutputDir(config.Output),
 	})
 	if err != nil {
-		return err
+		return providers.BuildResult{}, err
 	}
 
+	return result, nil
+}
+
+func printBuildArtifacts(output io.Writer, result providers.BuildResult) error {
 	for _, artifact := range result.Artifacts {
 		if _, err := fmt.Fprintln(output, artifact.Path); err != nil {
 			return fmt.Errorf("write build artifact path: %w", err)
