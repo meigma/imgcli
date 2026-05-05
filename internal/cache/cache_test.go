@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,6 +65,10 @@ func TestDiskStoreFetchUsesVerifiedCacheHit(t *testing.T) {
 	assert.Equal(t, int64(len(body)), blob.Size)
 	assert.Equal(t, int64(0), requests.Load())
 	assertReadOnlyFile(t, blob.Path)
+	metadata := readCachedMetadata(t, root, digest)
+	assert.Equal(t, digest, metadata.SHA256)
+	assert.Equal(t, int64(len(body)), metadata.Size)
+	assert.False(t, metadata.LastUsed.IsZero())
 }
 
 func TestDiskStoreFetchRejectsCacheHitWithConflictingSize(t *testing.T) {
@@ -106,6 +112,197 @@ func TestDiskStoreFetchUnknownDigest(t *testing.T) {
 	assert.Equal(t, int64(1), requests.Load())
 	assertFileContent(t, blob.Path, body)
 	assertReadOnlyFile(t, blob.Path)
+	metadata := readCachedMetadata(t, root, digest)
+	assert.Equal(t, digest, metadata.SHA256)
+	assert.Equal(t, int64(len(body)), metadata.Size)
+	assert.False(t, metadata.LastUsed.IsZero())
+}
+
+func TestDiskStoreFetchUpdatesMetadataOnCacheHit(t *testing.T) {
+	body := []byte("already cached bytes")
+	server, requests := newBlobServer(t, http.StatusInternalServerError, []byte("should not be requested"))
+	root := t.TempDir()
+	store := newDiskStore(t, root)
+	digest := sha256Hex(body)
+	writeCachedBlob(t, root, digest, body)
+	writeCachedMetadata(t, root, blobMetadataForTest{
+		SHA256:   digest,
+		Size:     int64(len(body)),
+		LastUsed: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
+	})
+	beforeFetch := time.Now().UTC()
+
+	blob, err := store.Fetch(context.Background(), cache.FetchRequest{
+		URL:            server.URL + "/blob",
+		ExpectedSHA256: digest,
+		ExpectedSize:   int64(len(body)),
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, cachedBlobPath(root, digest), blob.Path)
+	assert.Equal(t, int64(0), requests.Load())
+	metadata := readCachedMetadata(t, root, digest)
+	assert.False(t, metadata.LastUsed.Before(beforeFetch))
+}
+
+func TestDiskStoreFetchDoesNotPruneAutomatically(t *testing.T) {
+	root := t.TempDir()
+	store := newDiskStoreWithOptions(t, cache.WithRoot(root), cache.WithMaxSizeBytes(1))
+	oldDigest := writeCachedBlobWithMetadata(
+		t,
+		root,
+		[]byte("old cached bytes"),
+		time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC),
+	)
+	body := []byte("new cached bytes")
+	server, _ := newBlobServer(t, http.StatusOK, body)
+	keepDigest := sha256Hex(body)
+
+	_, err := store.Fetch(context.Background(), cache.FetchRequest{
+		URL:            server.URL + "/blob",
+		ExpectedSHA256: keepDigest,
+		ExpectedSize:   int64(len(body)),
+	})
+
+	require.NoError(t, err)
+	assert.FileExists(t, cachedBlobPath(root, oldDigest))
+	assert.FileExists(t, cachedBlobPath(root, keepDigest))
+}
+
+func TestDiskStorePruneRemovesLeastRecentlyUsedBlobs(t *testing.T) {
+	root := t.TempDir()
+	store := newDiskStoreWithOptions(t, cache.WithRoot(root), cache.WithMaxSizeBytes(10))
+	oldDigest := writeCachedBlobWithMetadata(t, root, []byte("old!"), time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC))
+	middleDigest := writeCachedBlobWithMetadata(t, root, []byte("mid!"), time.Date(2026, 5, 1, 11, 0, 0, 0, time.UTC))
+	recentDigest := writeCachedBlobWithMetadata(t, root, []byte("new?"), time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC))
+	body := []byte("keep")
+	server, _ := newBlobServer(t, http.StatusOK, body)
+	keepDigest := sha256Hex(body)
+
+	blob, err := store.Fetch(context.Background(), cache.FetchRequest{
+		URL:            server.URL + "/blob",
+		ExpectedSHA256: keepDigest,
+		ExpectedSize:   int64(len(body)),
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, cachedBlobPath(root, keepDigest), blob.Path)
+	require.NoError(t, store.Prune(context.Background()))
+	assert.NoFileExists(t, cachedBlobPath(root, oldDigest))
+	assert.NoFileExists(t, cachedBlobPath(root, middleDigest))
+	assert.FileExists(t, cachedBlobPath(root, recentDigest))
+	assert.FileExists(t, cachedBlobPath(root, keepDigest))
+}
+
+func TestDiskStorePruneKeepsOnlyBlobWhenItExceedsCacheLimit(t *testing.T) {
+	body := []byte("larger than cache limit")
+	server, _ := newBlobServer(t, http.StatusOK, body)
+	root := t.TempDir()
+	store := newDiskStoreWithOptions(t, cache.WithRoot(root), cache.WithMaxSizeBytes(1))
+	digest := sha256Hex(body)
+
+	blob, err := store.Fetch(context.Background(), cache.FetchRequest{
+		URL:            server.URL + "/blob",
+		ExpectedSHA256: digest,
+		ExpectedSize:   int64(len(body)),
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, cachedBlobPath(root, digest), blob.Path)
+	require.NoError(t, store.Prune(context.Background()))
+	assert.FileExists(t, cachedBlobPath(root, digest))
+	assert.FileExists(t, cachedMetadataPath(root, digest))
+}
+
+func TestDiskStorePruneSkipsLRUPruningWhenDisabled(t *testing.T) {
+	root := t.TempDir()
+	store := newDiskStoreWithOptions(t, cache.WithRoot(root), cache.WithMaxSizeBytes(0))
+	oldDigest := writeCachedBlobWithMetadata(
+		t,
+		root,
+		[]byte("old cached bytes"),
+		time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC),
+	)
+	body := []byte("new cached bytes")
+	server, _ := newBlobServer(t, http.StatusOK, body)
+	keepDigest := sha256Hex(body)
+
+	_, err := store.Fetch(context.Background(), cache.FetchRequest{
+		URL:            server.URL + "/blob",
+		ExpectedSHA256: keepDigest,
+		ExpectedSize:   int64(len(body)),
+	})
+
+	require.NoError(t, err)
+	require.NoError(t, store.Prune(context.Background()))
+	assert.FileExists(t, cachedBlobPath(root, oldDigest))
+	assert.FileExists(t, cachedBlobPath(root, keepDigest))
+}
+
+func TestDiskStorePruneHandlesMissingOrCorruptMetadata(t *testing.T) {
+	root := t.TempDir()
+	store := newDiskStoreWithOptions(t, cache.WithRoot(root), cache.WithMaxSizeBytes(8))
+	oldTime := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
+	missingDigest := writeCachedBlobAt(t, root, []byte("miss"), oldTime)
+	corruptDigest := writeCachedBlobAt(t, root, []byte("bad!"), oldTime)
+	writeCorruptCachedMetadata(t, root, corruptDigest)
+	recentDigest := writeCachedBlobWithMetadata(t, root, []byte("stay"), time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC))
+	body := []byte("keep")
+	server, _ := newBlobServer(t, http.StatusOK, body)
+	keepDigest := sha256Hex(body)
+
+	_, err := store.Fetch(context.Background(), cache.FetchRequest{
+		URL:            server.URL + "/blob",
+		ExpectedSHA256: keepDigest,
+		ExpectedSize:   int64(len(body)),
+	})
+
+	require.NoError(t, err)
+	require.NoError(t, store.Prune(context.Background()))
+	assert.NoFileExists(t, cachedBlobPath(root, missingDigest))
+	assert.NoFileExists(t, cachedBlobPath(root, corruptDigest))
+	assert.FileExists(t, cachedBlobPath(root, recentDigest))
+	assert.FileExists(t, cachedBlobPath(root, keepDigest))
+}
+
+func TestDiskStoreLockCreatesCacheLockFile(t *testing.T) {
+	root := t.TempDir()
+	store := newDiskStore(t, root)
+
+	lock, err := store.Lock(context.Background())
+
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(root, "cache.lock"))
+	require.NoError(t, lock.Unlock())
+}
+
+func TestDiskStoreLockHonorsContextCancellation(t *testing.T) {
+	root := t.TempDir()
+	store := newDiskStore(t, root)
+	firstLock, err := store.Lock(context.Background())
+	require.NoError(t, err)
+	defer firstLock.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	secondLock, err := store.Lock(ctx)
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Nil(t, secondLock)
+}
+
+func TestDiskStoreLockReleasesOnUnlock(t *testing.T) {
+	root := t.TempDir()
+	store := newDiskStore(t, root)
+	firstLock, err := store.Lock(context.Background())
+	require.NoError(t, err)
+
+	require.NoError(t, firstLock.Unlock())
+	require.NoError(t, firstLock.Unlock())
+
+	secondLock, err := store.Lock(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, secondLock.Unlock())
 }
 
 func TestDiskStoreFetchReplacesCorruptCacheEntry(t *testing.T) {
@@ -352,6 +549,8 @@ func TestDiskStoreRepairsUnsafeCacheDirectoryPermissions(t *testing.T) {
 		root,
 		filepath.Join(root, "blobs"),
 		filepath.Join(root, "blobs", "sha256"),
+		filepath.Join(root, "metadata"),
+		filepath.Join(root, "metadata", "sha256"),
 		filepath.Join(root, "tmp"),
 	} {
 		require.NoError(t, os.MkdirAll(dir, 0o750))
@@ -367,6 +566,8 @@ func TestDiskStoreRepairsUnsafeCacheDirectoryPermissions(t *testing.T) {
 	assertDirPerm(t, root, 0o750)
 	assertDirPerm(t, filepath.Join(root, "blobs"), 0o750)
 	assertDirPerm(t, filepath.Join(root, "blobs", "sha256"), 0o750)
+	assertDirPerm(t, filepath.Join(root, "metadata"), 0o750)
+	assertDirPerm(t, filepath.Join(root, "metadata", "sha256"), 0o750)
 	assertDirPerm(t, filepath.Join(root, "tmp"), 0o700)
 }
 
@@ -403,18 +604,44 @@ func TestDiskStoreCreatesRestrictiveCacheDirectories(t *testing.T) {
 	assertDirPerm(t, root, 0o750)
 	assertDirPerm(t, filepath.Join(root, "blobs"), 0o750)
 	assertDirPerm(t, filepath.Join(root, "blobs", "sha256"), 0o750)
+	assertDirPerm(t, filepath.Join(root, "metadata"), 0o750)
+	assertDirPerm(t, filepath.Join(root, "metadata", "sha256"), 0o750)
 	assertDirPerm(t, filepath.Join(root, "tmp"), 0o700)
 }
 
 func TestNewDiskStoreValidatesOptions(t *testing.T) {
-	store, err := cache.NewDiskStore(
-		cache.WithRoot(t.TempDir()),
-		cache.WithMaxUnknownSizeBytes(-1),
-	)
+	tests := []struct {
+		name    string
+		options []cache.Option
+		wantErr string
+	}{
+		{
+			name: "negative unknown size cap",
+			options: []cache.Option{
+				cache.WithRoot(t.TempDir()),
+				cache.WithMaxUnknownSizeBytes(-1),
+			},
+			wantErr: "cache max unknown-size bytes must be non-negative",
+		},
+		{
+			name: "negative max size",
+			options: []cache.Option{
+				cache.WithRoot(t.TempDir()),
+				cache.WithMaxSizeBytes(-1),
+			},
+			wantErr: "cache max size bytes must be non-negative",
+		},
+	}
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cache max unknown-size bytes must be non-negative")
-	assert.Nil(t, store)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, err := cache.NewDiskStore(tt.options...)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+			assert.Nil(t, store)
+		})
+	}
 }
 
 func newDiskStore(t *testing.T, root string) *cache.DiskStore {
@@ -455,8 +682,68 @@ func writeCachedBlob(t *testing.T, root string, digest string, body []byte) {
 	require.NoError(t, os.WriteFile(path, body, 0o600))
 }
 
+func writeCachedBlobAt(t *testing.T, root string, body []byte, modTime time.Time) string {
+	t.Helper()
+
+	digest := sha256Hex(body)
+	writeCachedBlob(t, root, digest, body)
+	path := cachedBlobPath(root, digest)
+	require.NoError(t, os.Chtimes(path, modTime, modTime))
+	return digest
+}
+
+func writeCachedBlobWithMetadata(t *testing.T, root string, body []byte, lastUsed time.Time) string {
+	t.Helper()
+
+	digest := writeCachedBlobAt(t, root, body, lastUsed)
+	writeCachedMetadata(t, root, blobMetadataForTest{
+		SHA256:   digest,
+		Size:     int64(len(body)),
+		LastUsed: lastUsed,
+	})
+	return digest
+}
+
+type blobMetadataForTest struct {
+	SHA256   string    `json:"sha256"`
+	Size     int64     `json:"size"`
+	LastUsed time.Time `json:"lastUsed"`
+}
+
+func writeCachedMetadata(t *testing.T, root string, metadata blobMetadataForTest) {
+	t.Helper()
+
+	path := cachedMetadataPath(root, metadata.SHA256)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
+	data, err := json.Marshal(metadata)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+}
+
+func writeCorruptCachedMetadata(t *testing.T, root string, digest string) {
+	t.Helper()
+
+	path := cachedMetadataPath(root, digest)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
+	require.NoError(t, os.WriteFile(path, []byte("not-json"), 0o600))
+}
+
+func readCachedMetadata(t *testing.T, root string, digest string) blobMetadataForTest {
+	t.Helper()
+
+	data, err := os.ReadFile(cachedMetadataPath(root, digest))
+	require.NoError(t, err)
+	var metadata blobMetadataForTest
+	require.NoError(t, json.Unmarshal(data, &metadata))
+	return metadata
+}
+
 func cachedBlobPath(root string, digest string) string {
 	return filepath.Join(root, "blobs", "sha256", digest[:2], digest)
+}
+
+func cachedMetadataPath(root string, digest string) string {
+	return filepath.Join(root, "metadata", "sha256", digest[:2], digest+".json")
 }
 
 func sha256Hex(data []byte) string {

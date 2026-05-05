@@ -16,17 +16,21 @@ import (
 
 const (
 	cacheDirName = "imgcli"
+	lockFileName = "cache.lock"
 
 	bytesPerKiB                int64 = 1024
 	bytesPerMiB                      = bytesPerKiB * bytesPerKiB
 	bytesPerGiB                      = bytesPerMiB * bytesPerKiB
 	defaultMaxUnknownSizeGiB         = 64
 	defaultMaxUnknownSizeBytes       = defaultMaxUnknownSizeGiB * bytesPerGiB
+	defaultMaxSizeGiB                = 10
+	defaultMaxSizeBytes              = defaultMaxSizeGiB * bytesPerGiB
 
 	blobPerm          = 0o400
 	hexCharsPerByte   = 2
 	digestShardLength = 2
 	dirPerm           = 0o750
+	metadataPerm      = 0o600
 	sha256HexLength   = sha256.Size * hexCharsPerByte
 	tmpPerm           = 0o700
 	writePermMask     = 0o222
@@ -69,6 +73,7 @@ type Option func(*DiskStore)
 type DiskStore struct {
 	root                string
 	httpClient          *http.Client
+	maxSizeBytes        int64
 	maxUnknownSizeBytes int64
 }
 
@@ -88,6 +93,15 @@ func WithMaxUnknownSizeBytes(size int64) Option {
 	}
 }
 
+// WithMaxSizeBytes configures the maximum cache size for LRU pruning.
+//
+// Zero disables cache-size pruning.
+func WithMaxSizeBytes(size int64) Option {
+	return func(store *DiskStore) {
+		store.maxSizeBytes = size
+	}
+}
+
 // NewDiskStore constructs a disk-backed cache store.
 func NewDiskStore(options ...Option) (*DiskStore, error) {
 	root, err := defaultRoot()
@@ -98,6 +112,7 @@ func NewDiskStore(options ...Option) (*DiskStore, error) {
 	store := &DiskStore{
 		root:                root,
 		httpClient:          http.DefaultClient,
+		maxSizeBytes:        defaultMaxSizeBytes,
 		maxUnknownSizeBytes: defaultMaxUnknownSizeBytes,
 	}
 	for _, option := range options {
@@ -109,6 +124,9 @@ func NewDiskStore(options ...Option) (*DiskStore, error) {
 	}
 	if store.maxUnknownSizeBytes < 0 {
 		return nil, errors.New("cache max unknown-size bytes must be non-negative")
+	}
+	if store.maxSizeBytes < 0 {
+		return nil, errors.New("cache max size bytes must be non-negative")
 	}
 
 	return store, nil
@@ -122,19 +140,12 @@ func (s *DiskStore) Fetch(ctx context.Context, req FetchRequest) (Blob, error) {
 	}
 
 	if normalized.ExpectedSHA256 != "" {
-		path := s.blobPath(normalized.ExpectedSHA256)
-		if pathErr := s.ensureExpectedDigestPath(path); pathErr != nil {
-			return Blob{}, pathErr
-		}
-		blob, ok, verifyErr := verifyExistingBlob(path, normalized.ExpectedSHA256, normalized.ExpectedSize)
-		if verifyErr != nil {
-			return Blob{}, verifyErr
+		blob, ok, cacheErr := s.verifiedCacheHit(normalized)
+		if cacheErr != nil {
+			return Blob{}, cacheErr
 		}
 		if ok {
 			return blob, nil
-		}
-		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			return Blob{}, fmt.Errorf("remove corrupt cached blob: %w", removeErr)
 		}
 	}
 
@@ -150,8 +161,35 @@ func (s *DiskStore) Fetch(ctx context.Context, req FetchRequest) (Blob, error) {
 	if err != nil {
 		return Blob{}, err
 	}
+	if touchErr := s.touchBlob(blob); touchErr != nil {
+		return Blob{}, touchErr
+	}
 
 	return blob, nil
+}
+
+func (s *DiskStore) verifiedCacheHit(req FetchRequest) (Blob, bool, error) {
+	path := s.blobPath(req.ExpectedSHA256)
+	if pathErr := s.ensureExpectedDigestPath(path); pathErr != nil {
+		return Blob{}, false, pathErr
+	}
+
+	blob, ok, verifyErr := verifyExistingBlob(path, req.ExpectedSHA256, req.ExpectedSize)
+	if verifyErr != nil {
+		return Blob{}, false, verifyErr
+	}
+	if !ok {
+		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return Blob{}, false, fmt.Errorf("remove corrupt cached blob: %w", removeErr)
+		}
+		return Blob{}, false, nil
+	}
+
+	if touchErr := s.touchBlob(blob); touchErr != nil {
+		return Blob{}, false, touchErr
+	}
+
+	return blob, true, nil
 }
 
 func (s *DiskStore) ensureExpectedDigestPath(path string) error {
@@ -344,6 +382,8 @@ func (s *DiskStore) ensureDirs() error {
 		{path: s.root, perm: dirPerm},
 		{path: filepath.Join(s.root, "blobs"), perm: dirPerm},
 		{path: filepath.Join(s.root, "blobs", "sha256"), perm: dirPerm},
+		{path: filepath.Join(s.root, "metadata"), perm: dirPerm},
+		{path: filepath.Join(s.root, "metadata", "sha256"), perm: dirPerm},
 		{path: s.tmpDir(), perm: tmpPerm},
 	} {
 		if err := ensureCacheDir(dir.path, dir.perm); err != nil {
