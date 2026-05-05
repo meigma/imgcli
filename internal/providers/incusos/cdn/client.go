@@ -3,6 +3,7 @@ package cdn
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/meigma/imgcli/internal/cache"
 	"github.com/meigma/imgcli/internal/providers/incusos"
 	"github.com/meigma/imgcli/schemas/core"
 )
@@ -30,8 +32,9 @@ type Option func(*Client)
 
 // Client resolves and downloads IncusOS images from the Linux Containers CDN.
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
+	baseURL      string
+	cacheService cache.Service
+	httpClient   *http.Client
 }
 
 // WithBaseURL configures the CDN base URL containing index.json.
@@ -46,6 +49,15 @@ func WithHTTPClient(httpClient *http.Client) Option {
 	return func(client *Client) {
 		if httpClient != nil {
 			client.httpClient = httpClient
+		}
+	}
+}
+
+// WithCacheService configures the cache service used for source image downloads.
+func WithCacheService(cacheService cache.Service) Option {
+	return func(client *Client) {
+		if cacheService != nil {
+			client.cacheService = cacheService
 		}
 	}
 }
@@ -126,9 +138,30 @@ func (c *Client) ResolveImage(ctx context.Context, query incusos.ImageQuery) (in
 	)
 }
 
-// DownloadImage downloads and verifies the provided image asset.
-func (c *Client) DownloadImage(_ context.Context, _ incusos.ImageAsset, _ string) (incusos.DownloadedImage, error) {
-	return incusos.DownloadedImage{}, incusos.ErrNotImplemented
+// DownloadImage downloads and verifies the provided image asset through the shared cache service.
+func (c *Client) DownloadImage(ctx context.Context, asset incusos.ImageAsset) (incusos.DownloadedImage, error) {
+	if c.cacheService == nil {
+		return incusos.DownloadedImage{}, errors.New("incusos cache service is required")
+	}
+	if err := validateDownloadAsset(asset); err != nil {
+		return incusos.DownloadedImage{}, err
+	}
+
+	blob, err := c.cacheService.Fetch(ctx, cache.FetchRequest{
+		URL:            asset.URL,
+		ExpectedSHA256: asset.SHA256,
+		ExpectedSize:   asset.Size,
+	})
+	if err != nil {
+		return incusos.DownloadedImage{}, fmt.Errorf("download incusos image through cache: %w", err)
+	}
+
+	return incusos.DownloadedImage{
+		Asset:  asset,
+		Path:   blob.Path,
+		SHA256: blob.SHA256,
+		Size:   blob.Size,
+	}, nil
 }
 
 func (c *Client) fetchIndex(ctx context.Context) (catalogIndex, error) {
@@ -190,6 +223,17 @@ func (c *Client) httpClientOrDefault() *http.Client {
 	}
 
 	return c.httpClient
+}
+
+func validateDownloadAsset(asset incusos.ImageAsset) error {
+	if strings.TrimSpace(asset.URL) == "" {
+		return errors.New("incusos image URL is required")
+	}
+	if strings.TrimSpace(asset.SHA256) == "" {
+		return errors.New("incusos image SHA-256 is required")
+	}
+
+	return nil
 }
 
 func normalizeQuery(query incusos.ImageQuery) (incusos.ImageQuery, error) {

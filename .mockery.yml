@@ -1,0 +1,14 @@
+all: false
+force-file-write: true
+formatter: goimports
+log-level: info
+template: testify
+packages:
+  github.com/meigma/imgcli/internal/cache:
+    config:
+      dir: internal/cache/mocks
+      filename: service.go
+      pkgname: mocks
+      structname: MockService
+    interfaces:
+      Service:

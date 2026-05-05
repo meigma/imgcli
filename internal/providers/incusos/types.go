@@ -16,7 +16,7 @@ type Catalog interface {
 // Downloader retrieves IncusOS source image assets.
 type Downloader interface {
 	// DownloadImage downloads and verifies the provided image asset.
-	DownloadImage(ctx context.Context, asset ImageAsset, dst string) (DownloadedImage, error)
+	DownloadImage(ctx context.Context, asset ImageAsset) (DownloadedImage, error)
 }
 
 // SeedBuilder creates IncusOS seed archives.
