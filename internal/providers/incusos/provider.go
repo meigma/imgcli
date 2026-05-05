@@ -4,14 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
+	"path/filepath"
+	"strings"
 
 	"github.com/meigma/imgcli/internal/providers"
 	"github.com/meigma/imgcli/schemas/core"
 	incusosschema "github.com/meigma/imgcli/schemas/providers/incusos"
 )
 
-const providerName core.ProviderName = "incusos"
+const (
+	defaultOutputDir = "dist"
+	defaultImageName = "image"
+	providerName     = core.ProviderName("incusos")
+)
 
 var _ providers.Provider = (*Provider)(nil)
 
@@ -22,9 +27,6 @@ type Config = incusosschema.Config
 type Options struct {
 	// Catalog resolves IncusOS release metadata into source image assets.
 	Catalog Catalog
-
-	// Output receives temporary shallow build output. Nil discards output.
-	Output io.Writer
 
 	// Downloader retrieves and verifies IncusOS source image assets.
 	Downloader Downloader
@@ -61,17 +63,31 @@ func (p *Provider) Plan(_ context.Context, _ providers.PlanRequest) (providers.P
 }
 
 // Build creates IncusOS artifacts from an already resolved plan.
-func (p *Provider) Build(ctx context.Context, _ providers.BuildRequest) (providers.BuildResult, error) {
+func (p *Provider) Build(ctx context.Context, req providers.BuildRequest) (providers.BuildResult, error) {
 	if p.options.Catalog == nil {
 		return providers.BuildResult{}, errors.New("incusos catalog is required")
 	}
+	if p.options.Downloader == nil {
+		return providers.BuildResult{}, errors.New("incusos downloader is required")
+	}
+	if p.options.SeedBuilder == nil {
+		return providers.BuildResult{}, errors.New("incusos seed builder is required")
+	}
+	if p.options.ImageInjector == nil {
+		return providers.BuildResult{}, errors.New("incusos image injector is required")
+	}
 
-	variant, err := singleVariant(p.config)
+	variantName, variant, err := singleVariant(p.config)
 	if err != nil {
 		return providers.BuildResult{}, err
 	}
 
 	imageType, err := imageTypeForFormat(variant.Artifact.Format)
+	if err != nil {
+		return providers.BuildResult{}, err
+	}
+
+	outputPath, err := artifactOutputPath(req, variantName, variant.Artifact)
 	if err != nil {
 		return providers.BuildResult{}, err
 	}
@@ -87,35 +103,106 @@ func (p *Provider) Build(ctx context.Context, _ providers.BuildRequest) (provide
 		return providers.BuildResult{}, err
 	}
 
-	if _, err := fmt.Fprintln(p.output(), asset.URL); err != nil {
-		return providers.BuildResult{}, fmt.Errorf("write incusos image URL: %w", err)
+	downloaded, err := p.options.Downloader.DownloadImage(ctx, asset)
+	if err != nil {
+		return providers.BuildResult{}, err
 	}
 
-	return providers.BuildResult{}, nil
-}
-
-func (p *Provider) output() io.Writer {
-	if p.options.Output == nil {
-		return io.Discard
+	seed, err := p.options.SeedBuilder.BuildSeed(ctx, p.config)
+	if err != nil {
+		return providers.BuildResult{}, err
 	}
 
-	return p.options.Output
+	customized, err := p.options.ImageInjector.InjectSeed(ctx, downloaded, seed, outputPath)
+	if err != nil {
+		return providers.BuildResult{}, err
+	}
+
+	artifactPlan := providers.ArtifactPlan{
+		Key:          core.ArtifactKey(variantName),
+		Variant:      variantName,
+		Architecture: variant.Artifact.Architecture,
+		Format:       variant.Artifact.Format,
+		MediaType:    variant.Artifact.MediaType,
+		OutputPath:   outputPath,
+		Labels:       variant.Artifact.Labels,
+		Annotations:  variant.Artifact.Annotations,
+	}
+	plan := req.Plan
+	plan.Provider = providerName
+	plan.OutputDir = outputDir(req)
+	plan.Artifacts = []providers.ArtifactPlan{artifactPlan}
+
+	return providers.BuildResult{
+		Plan: plan,
+		Artifacts: []providers.BuiltArtifact{
+			{
+				Plan:   artifactPlan,
+				Path:   customized.Path,
+				Size:   customized.Size,
+				SHA256: customized.SHA256,
+			},
+		},
+	}, nil
 }
 
-func singleVariant(config Config) (incusosschema.Variant, error) {
+func singleVariant(config Config) (core.VariantName, incusosschema.Variant, error) {
 	switch len(config.Variants) {
 	case 0:
-		return incusosschema.Variant{}, errors.New("incusos build requires exactly one variant, got 0")
+		return "", incusosschema.Variant{}, errors.New("incusos build requires exactly one variant, got 0")
 	case 1:
-		for _, variant := range config.Variants {
-			return variant, nil
+		for name, variant := range config.Variants {
+			return name, variant, nil
 		}
 	}
 
-	return incusosschema.Variant{}, fmt.Errorf(
+	return "", incusosschema.Variant{}, fmt.Errorf(
 		"incusos build requires exactly one variant, got %d",
 		len(config.Variants),
 	)
+}
+
+func artifactOutputPath(
+	req providers.BuildRequest,
+	variantName core.VariantName,
+	artifact core.ArtifactIntent,
+) (string, error) {
+	filename := strings.TrimSpace(artifact.Filename)
+	if filename == "" {
+		filename = fallbackArtifactFilename(req.Plan.Image.Name, variantName, artifact)
+	}
+	if filepath.IsAbs(filename) {
+		return "", fmt.Errorf("incusos artifact filename must be relative: %q", filename)
+	}
+
+	cleanFilename := filepath.Clean(filename)
+	if cleanFilename == "." || cleanFilename == ".." ||
+		strings.HasPrefix(cleanFilename, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("incusos artifact filename must stay within output directory: %q", filename)
+	}
+
+	return filepath.Join(outputDir(req), cleanFilename), nil
+}
+
+func fallbackArtifactFilename(imageName core.Name, variantName core.VariantName, artifact core.ArtifactIntent) string {
+	name := strings.TrimSpace(string(imageName))
+	if name == "" {
+		name = defaultImageName
+	}
+
+	return fmt.Sprintf("%s-%s-%s.%s", name, variantName, artifact.Architecture, artifact.Format)
+}
+
+func outputDir(req providers.BuildRequest) string {
+	outputDir := strings.TrimSpace(req.OutputDir)
+	if outputDir == "" {
+		outputDir = strings.TrimSpace(req.Plan.OutputDir)
+	}
+	if outputDir == "" {
+		return defaultOutputDir
+	}
+
+	return outputDir
 }
 
 func resolveSource(defaults *incusosschema.Defaults, variantSource *incusosschema.Source) incusosschema.Source {
@@ -142,8 +229,6 @@ func imageTypeForFormat(format core.ArtifactFormat) (ImageType, error) {
 	switch format {
 	case "raw", "raw.gz":
 		return ImageTypeRaw, nil
-	case "iso":
-		return ImageTypeISO, nil
 	default:
 		return "", fmt.Errorf("unsupported incusos artifact format %q", format)
 	}
