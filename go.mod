@@ -6,6 +6,7 @@ require (
 	charm.land/log/v2 v2.0.0
 	cuelang.org/go v0.16.1
 	github.com/charmbracelet/colorprofile v0.4.2
+	github.com/gofrs/flock v0.13.0
 	github.com/lxc/incus-os/incus-osd v0.0.0-20260505023852-d32ba1f13f6f
 	github.com/meigma/imgcli/schemas v0.0.0-20260504225557-fa97d8c3fe0c
 	github.com/spf13/cobra v1.10.2

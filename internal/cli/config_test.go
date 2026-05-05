@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -97,11 +98,122 @@ func TestConfigFlagOverridesConfigEnvironment(t *testing.T) {
 	assert.Equal(t, "dev\n", result.stdout)
 }
 
+func TestDefaultConfigFileLoadsFromXDGConfigHome(t *testing.T) {
+	clearIMGCLIEnv(t)
+	xdgConfigHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+	configPath := filepath.Join(xdgConfigHome, "imgcli", "config.yaml")
+	writeConfigContent(t, configPath, fmt.Sprintf("%s: %q\n", KeyLogFormat, "yaml"))
+
+	result := executeCommand(t, Options{}, "version")
+
+	require.Error(t, result.err)
+	assert.ErrorContains(t, result.err, `invalid log format "yaml"`)
+}
+
+func TestConfigFlagOverridesDefaultXDGConfigFile(t *testing.T) {
+	clearIMGCLIEnv(t)
+	xdgConfigHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+	defaultConfigPath := filepath.Join(xdgConfigHome, "imgcli", "config.yaml")
+	writeConfigContent(t, defaultConfigPath, fmt.Sprintf("%s: %q\n", KeyLogFormat, "yaml"))
+	flagConfigPath := writeConfig(t, KeyLogFormat, "logfmt")
+
+	result := executeCommand(t, Options{}, "--config", flagConfigPath, "version")
+
+	require.NoError(t, result.err)
+	assert.Equal(t, "dev\n", result.stdout)
+}
+
+func TestCacheConfigDefaults(t *testing.T) {
+	clearIMGCLIEnv(t)
+	cfg, err := loadConfig(newConfigViper())
+
+	require.NoError(t, err)
+	assert.Empty(t, cfg.CacheDir)
+	assert.Equal(t, int64(10*(1<<30)), cfg.CacheMaxSizeBytes)
+}
+
+func TestCacheConfigFileValues(t *testing.T) {
+	clearIMGCLIEnv(t)
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	configPath := filepath.Join(t.TempDir(), "imgcli.yaml")
+	writeConfigContent(t, configPath, fmt.Sprintf(`
+cache:
+  dir: %q
+  max-size: "0"
+`, cacheDir))
+	vp := newConfigViper()
+	vp.Set(KeyConfig, configPath)
+
+	cfg, err := loadConfig(vp)
+
+	require.NoError(t, err)
+	assert.Equal(t, configPath, cfg.ConfigFile)
+	assert.Equal(t, cacheDir, cfg.CacheDir)
+	assert.Equal(t, int64(0), cfg.CacheMaxSizeBytes)
+}
+
+func TestCacheConfigPrecedence(t *testing.T) {
+	t.Run("invalid config file fails", func(t *testing.T) {
+		clearIMGCLIEnv(t)
+		configPath := writeConfig(t, KeyCacheMaxSize, "nope")
+
+		result := executeCommand(t, Options{}, "--config", configPath, "version")
+
+		require.Error(t, result.err)
+		assert.ErrorContains(t, result.err, `invalid cache.max-size "nope"`)
+	})
+
+	t.Run("env overrides config file", func(t *testing.T) {
+		clearIMGCLIEnv(t)
+		configPath := writeConfig(t, KeyCacheMaxSize, "nope")
+		t.Setenv("IMGCLI_CACHE_MAX_SIZE", "1GB")
+
+		result := executeCommand(t, Options{}, "--config", configPath, "version")
+
+		require.NoError(t, result.err)
+		assert.Equal(t, "dev\n", result.stdout)
+	})
+
+	t.Run("flag overrides env", func(t *testing.T) {
+		clearIMGCLIEnv(t)
+		t.Setenv("IMGCLI_CACHE_MAX_SIZE", "nope")
+
+		result := executeCommand(t, Options{}, "--cache-max-size", "1GB", "version")
+
+		require.NoError(t, result.err)
+		assert.Equal(t, "dev\n", result.stdout)
+	})
+}
+
+func TestCacheConfigRejectsUnsupportedSizeUnits(t *testing.T) {
+	clearIMGCLIEnv(t)
+	configPath := writeConfig(t, KeyCacheMaxSize, "10GiB")
+
+	result := executeCommand(t, Options{}, "--config", configPath, "version")
+
+	require.Error(t, result.err)
+	assert.ErrorContains(t, result.err, `invalid cache.max-size "10GiB"`)
+}
+
 func writeConfig(t *testing.T, key string, value string) string {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "imgcli.yaml")
-	content := fmt.Sprintf("%s: %q\n", key, value)
-	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	writeConfigContent(t, path, fmt.Sprintf("%s: %q\n", key, value))
 	return path
+}
+
+func writeConfigContent(t *testing.T, path string, content string) {
+	t.Helper()
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+}
+
+func newConfigViper() *viper.Viper {
+	vp := viper.New()
+	configureViper(vp)
+	return vp
 }

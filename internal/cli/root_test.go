@@ -230,18 +230,20 @@ incusos: {
 			seed: incusos.SeedArchive{Data: []byte("seed")},
 		}
 		injector := &testImageInjector{}
+		cacheDir := filepath.Join(t.TempDir(), "cache")
 
 		result := executeCommand(t, Options{
 			IncusOSCatalog:       catalog,
 			IncusOSDownloader:    downloader,
 			IncusOSSeedBuilder:   seedBuilder,
 			IncusOSImageInjector: injector,
-		}, "build", configPath)
+		}, "--cache-dir", cacheDir, "build", configPath)
 
 		require.NoError(t, result.err)
 		wantOutputPath := filepath.Join(outputDir, "test-image-default-amd64.raw.gz")
 		assert.Equal(t, wantOutputPath+"\n", result.stdout)
 		assert.Empty(t, result.stderr)
+		assert.NoDirExists(t, cacheDir)
 		require.Len(t, catalog.queries, 1)
 		assert.Equal(t, incusos.ImageQuery{
 			Channel:      incusos.ChannelTesting,
@@ -282,6 +284,8 @@ func clearIMGCLIEnv(t *testing.T) {
 	t.Helper()
 
 	for _, key := range []string{
+		"IMGCLI_CACHE_DIR",
+		"IMGCLI_CACHE_MAX_SIZE",
 		"IMGCLI_CONFIG",
 		"IMGCLI_LOG_LEVEL",
 		"IMGCLI_LOG_FORMAT",
@@ -289,6 +293,7 @@ func clearIMGCLIEnv(t *testing.T) {
 	} {
 		t.Setenv(key, "")
 	}
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 }
 
 func writeImageConfig(t *testing.T, content string) string {
