@@ -22,6 +22,8 @@ fileGroups:
   go-config:
     - 'go.mod'
     - 'go.sum'
+    - 'go.work'
+    - 'go.work.sum'
   go-sources:
     - 'cmd/**/*.go'
     - 'internal/**/*.go'

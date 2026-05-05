@@ -54,7 +54,13 @@ func NewRootCommand(opts Options) (*cobra.Command, error) {
 		return nil, err
 	}
 
-	addCommands(root, newVersionCommand(rt))
+	addCommands(
+		root,
+		newPlanCommand(rt),
+		newBuildCommand(rt),
+		newPublishCommand(rt),
+		newVersionCommand(rt),
+	)
 
 	return root, nil
 }

@@ -3,6 +3,8 @@ package cli
 import (
 	"io"
 	"os"
+
+	"github.com/meigma/imgcli/internal/providers/incusos"
 )
 
 // Options configures the root imgcli command.
@@ -21,6 +23,9 @@ type Options struct {
 
 	// Environ provides terminal environment values for output adapters. Nil selects os.Environ().
 	Environ []string
+
+	// IncusOSCatalog resolves IncusOS source images. Nil selects the default CDN catalog.
+	IncusOSCatalog incusos.Catalog
 }
 
 func (o Options) version() string {
