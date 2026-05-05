@@ -3,12 +3,41 @@
 package incusos
 
 import (
+	"github.com/lxc/incus-os/incus-osd/api/seed"
 	"github.com/meigma/imgcli/schemas/core"
 )
 
 type Channel string
 
 type Version string
+
+// Seed defines the IncusOS seed files to include in a seed archive.
+// Each populated field is serialized to the corresponding <name>.yaml file.
+type Seed struct {
+	// Install configures install.yaml for installer behavior.
+	Install *seed.Install `json:"install,omitempty"`
+
+	// Applications configures applications.yaml for bundled IncusOS apps.
+	Applications *seed.Applications `json:"applications,omitempty"`
+
+	// Incus configures incus.yaml for Incus preseed behavior.
+	Incus *seed.Incus `json:"incus,omitempty"`
+
+	// Network configures network.yaml for system network settings.
+	Network *seed.Network `json:"network,omitempty"`
+
+	// Provider configures provider.yaml for configuration provider settings.
+	Provider *seed.Provider `json:"provider,omitempty"`
+
+	// Update configures update.yaml for system update policy.
+	Update *seed.Update `json:"update,omitempty"`
+
+	// MigrationManager configures migration-manager.yaml.
+	MigrationManager *seed.MigrationManager `json:"migration-manager,omitempty"`
+
+	// OperationsCenter configures operations-center.yaml.
+	OperationsCenter *seed.OperationsCenter `json:"operations-center,omitempty"`
+}
 
 type Source struct {
 	// Release channel to select from the IncusOS image catalog.
@@ -32,6 +61,9 @@ type Variant struct {
 
 type Config struct {
 	Defaults *Defaults `json:"defaults,omitempty"`
+
+	// Seed defines IncusOS install seed files to embed in customized images.
+	Seed *Seed `json:"seed,omitempty"`
 
 	Variants map[core.VariantName]Variant `json:"variants"`
 }
