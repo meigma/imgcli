@@ -6,12 +6,32 @@ import (
 	"github.com/meigma/imgcli/schemas/core"
 )
 
+type Channel string
+
+type Version string
+
+type Source struct {
+	// Release channel to select from the IncusOS image catalog.
+	Channel Channel `json:"channel,omitempty"`
+
+	// Specific IncusOS release version. Empty means latest in the selected channel.
+	Version Version `json:"version,omitempty"`
+}
+
+type Defaults struct {
+	// Source image selection defaults applied to variants by provider planning.
+	Source *Source `json:"source,omitempty"`
+}
+
 type Variant struct {
+	// Source image selection for this variant.
+	Source *Source `json:"source,omitempty"`
+
 	Artifact core.ArtifactIntent `json:"artifact"`
 }
 
 type Config struct {
-	Defaults any/* CUE top */ `json:"defaults,omitempty"`
+	Defaults *Defaults `json:"defaults,omitempty"`
 
 	Variants map[core.VariantName]Variant `json:"variants"`
 }
