@@ -8,7 +8,8 @@ require (
 	github.com/charmbracelet/colorprofile v0.4.2
 	github.com/gofrs/flock v0.13.0
 	github.com/lxc/incus-os/incus-osd v0.0.0-20260505023852-d32ba1f13f6f
-	github.com/meigma/imgcli/schemas v0.0.0-20260504225557-fa97d8c3fe0c
+	github.com/meigma/imgcli/schemas v0.0.0-20260505154605-5bbbe47a1e06
+	github.com/meigma/imgsrv v0.0.0-20260505181350-0de592b46f88
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
@@ -53,7 +54,7 @@ require (
 	github.com/sagikazarmark/locafero v0.12.0 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
-	github.com/stretchr/objx v0.5.2 // indirect
+	github.com/stretchr/objx v0.5.3 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/zitadel/oidc/v3 v3.47.5 // indirect

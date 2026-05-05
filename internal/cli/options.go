@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/meigma/imgcli/internal/providers/incusos"
+	"github.com/meigma/imgcli/internal/publish"
 )
 
 // Options configures the root imgcli command.
@@ -35,6 +36,9 @@ type Options struct {
 
 	// IncusOSImageInjector writes IncusOS seed archives into source images. Nil selects the default image injector.
 	IncusOSImageInjector incusos.ImageInjector
+
+	// ImgsrvUploadsClient uploads artifacts to imgsrv. Nil selects the HTTP SDK client.
+	ImgsrvUploadsClient publish.UploadsClient
 }
 
 func (o Options) version() string {

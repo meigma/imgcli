@@ -18,6 +18,8 @@ bin/
 cover.out
 coverage.out
 coverage.html
+go.work.local
+go.work.local.sum
 *.test
 *.prof
 vendor/
