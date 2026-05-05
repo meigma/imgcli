@@ -1,9 +1,9 @@
 package incusos
 
 import (
-	"bytes"
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,125 +28,181 @@ func TestProviderPlanPlaceholderOperation(t *testing.T) {
 	assert.Empty(t, plan)
 }
 
-func TestProviderBuildResolvesImageURL(t *testing.T) {
+func TestProviderBuildCreatesCustomizedImage(t *testing.T) {
 	tests := []struct {
-		name      string
-		config    Config
-		wantQuery ImageQuery
+		name           string
+		artifact       core.ArtifactIntent
+		wantOutputPath func(outputDir string) string
 	}{
 		{
-			name: "uses stable by default",
-			config: Config{
-				Variants: map[core.VariantName]incusosschema.Variant{
-					"default": {
-						Artifact: core.ArtifactIntent{
-							Architecture: core.Architecture("amd64"),
-							Format:       core.ArtifactFormat("raw"),
-						},
-					},
-				},
-			},
-			wantQuery: ImageQuery{
-				Channel:      ChannelStable,
+			name: "uses configured artifact filename",
+			artifact: core.ArtifactIntent{
 				Architecture: core.Architecture("amd64"),
-				Type:         ImageTypeRaw,
+				Format:       core.ArtifactFormat("raw.gz"),
+				Filename:     "custom/incusos-smoke.img.gz",
+				MediaType:    "application/gzip",
+				Labels:       map[string]string{"tier": "smoke"},
+				Annotations:  map[string]string{"note": "e2e"},
+			},
+			wantOutputPath: func(outputDir string) string {
+				return filepath.Join(outputDir, "custom", "incusos-smoke.img.gz")
 			},
 		},
 		{
-			name: "uses variant source over defaults",
-			config: Config{
-				Defaults: &incusosschema.Defaults{
-					Source: &incusosschema.Source{
-						Channel: ChannelStable,
-						Version: Version("202604202240"),
-					},
-				},
-				Variants: map[core.VariantName]incusosschema.Variant{
-					"default": {
-						Source: &incusosschema.Source{
-							Channel: ChannelTesting,
-							Version: Version("202604282312"),
-						},
-						Artifact: core.ArtifactIntent{
-							Architecture: core.Architecture("arm64"),
-							Format:       core.ArtifactFormat("iso"),
-						},
-					},
-				},
-			},
-			wantQuery: ImageQuery{
-				Channel:      ChannelTesting,
-				Version:      Version("202604282312"),
-				Architecture: core.Architecture("arm64"),
-				Type:         ImageTypeISO,
-			},
-		},
-		{
-			name: "maps raw gzip artifact to raw image",
-			config: Config{
-				Variants: map[core.VariantName]incusosschema.Variant{
-					"default": {
-						Artifact: core.ArtifactIntent{
-							Architecture: core.Architecture("amd64"),
-							Format:       core.ArtifactFormat("raw.gz"),
-						},
-					},
-				},
-			},
-			wantQuery: ImageQuery{
-				Channel:      ChannelStable,
+			name: "derives artifact filename when omitted",
+			artifact: core.ArtifactIntent{
 				Architecture: core.Architecture("amd64"),
-				Type:         ImageTypeRaw,
+				Format:       core.ArtifactFormat("raw.gz"),
+			},
+			wantOutputPath: func(outputDir string) string {
+				return filepath.Join(outputDir, "test-image-default-amd64.raw.gz")
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			const assetURL = "https://example.invalid/incusos.img.gz"
-
-			catalog := &recordingCatalog{
-				asset: ImageAsset{URL: assetURL},
+			ctx := context.Background()
+			outputDir := t.TempDir()
+			asset := ImageAsset{
+				Version:      Version("202604261712"),
+				Architecture: core.Architecture("amd64"),
+				Type:         ImageTypeRaw,
+				URL:          "https://example.invalid/incusos.img.gz",
+				SHA256:       "source-sha",
+				Size:         42,
 			}
-			var output bytes.Buffer
-			provider := New(tt.config, Options{
-				Catalog: catalog,
-				Output:  &output,
+			downloaded := DownloadedImage{
+				Asset:  asset,
+				Path:   "/cache/source.img.gz",
+				SHA256: "source-sha",
+				Size:   42,
+			}
+			seed := SeedArchive{Data: []byte("seed")}
+			customized := CustomizedImage{
+				Source: downloaded,
+				Size:   99,
+				SHA256: "custom-sha",
+			}
+			catalog := &recordingCatalog{asset: asset}
+			downloader := &recordingDownloader{image: downloaded}
+			seedBuilder := &recordingSeedBuilder{seed: seed}
+			injector := &recordingImageInjector{image: customized}
+			config := Config{
+				Defaults: &incusosschema.Defaults{
+					Source: &incusosschema.Source{
+						Channel: ChannelStable,
+						Version: Version("202604202240"),
+					},
+				},
+				Seed: &incusosschema.Seed{},
+				Variants: map[core.VariantName]incusosschema.Variant{
+					"default": {
+						Source: &incusosschema.Source{
+							Channel: ChannelTesting,
+							Version: Version("202604261712"),
+						},
+						Artifact: tt.artifact,
+					},
+				},
+			}
+			provider := New(config, Options{
+				Catalog:       catalog,
+				Downloader:    downloader,
+				SeedBuilder:   seedBuilder,
+				ImageInjector: injector,
 			})
 
-			result, err := provider.Build(context.Background(), providers.BuildRequest{})
+			result, err := provider.Build(ctx, providers.BuildRequest{
+				Plan: providers.Plan{
+					Image: core.Image{Name: core.Name("test-image")},
+				},
+				OutputDir: outputDir,
+			})
 
 			require.NoError(t, err)
-			assert.Empty(t, result)
-			require.Len(t, catalog.queries, 1)
-			assert.Equal(t, tt.wantQuery, catalog.queries[0])
-			assert.Equal(t, assetURL+"\n", output.String())
+			wantOutputPath := tt.wantOutputPath(outputDir)
+			assert.Equal(t, []ImageQuery{
+				{
+					Channel:      ChannelTesting,
+					Version:      Version("202604261712"),
+					Architecture: core.Architecture("amd64"),
+					Type:         ImageTypeRaw,
+				},
+			}, catalog.queries)
+			assert.Equal(t, []ImageAsset{asset}, downloader.assets)
+			assert.Equal(t, []Config{config}, seedBuilder.configs)
+			require.Len(t, injector.calls, 1)
+			assert.Equal(t, downloaded, injector.calls[0].image)
+			assert.Equal(t, seed, injector.calls[0].seed)
+			assert.Equal(t, wantOutputPath, injector.calls[0].outputPath)
+
+			require.Len(t, result.Artifacts, 1)
+			assert.Equal(t, wantOutputPath, result.Artifacts[0].Path)
+			assert.Equal(t, int64(99), result.Artifacts[0].Size)
+			assert.Equal(t, "custom-sha", result.Artifacts[0].SHA256)
+			assert.Equal(t, providerName, result.Plan.Provider)
+			assert.Equal(t, core.Image{Name: core.Name("test-image")}, result.Plan.Image)
+			assert.Equal(t, outputDir, result.Plan.OutputDir)
+			require.Len(t, result.Plan.Artifacts, 1)
+			assert.Equal(t, result.Plan.Artifacts[0], result.Artifacts[0].Plan)
+			assert.Equal(t, providers.ArtifactPlan{
+				Key:          core.ArtifactKey("default"),
+				Variant:      core.VariantName("default"),
+				Architecture: tt.artifact.Architecture,
+				Format:       tt.artifact.Format,
+				MediaType:    tt.artifact.MediaType,
+				OutputPath:   wantOutputPath,
+				Labels:       tt.artifact.Labels,
+				Annotations:  tt.artifact.Annotations,
+			}, result.Plan.Artifacts[0])
 		})
 	}
 }
 
 func TestProviderBuildErrors(t *testing.T) {
 	catalogErr := errors.New("catalog failed")
+	downloadErr := errors.New("download failed")
+	seedErr := errors.New("seed failed")
+	injectErr := errors.New("inject failed")
 
 	tests := []struct {
-		name       string
-		config     Config
-		catalog    *recordingCatalog
-		wantErr    string
-		wantErrIs  error
-		wantOutput string
+		name      string
+		config    Config
+		options   Options
+		wantErr   string
+		wantErrIs error
 	}{
 		{
 			name:    "missing catalog",
 			config:  configWithVariant(core.ArtifactFormat("raw")),
+			options: optionsWithout(func(options *Options) { options.Catalog = nil }),
 			wantErr: "incusos catalog is required",
+		},
+		{
+			name:    "missing downloader",
+			config:  configWithVariant(core.ArtifactFormat("raw")),
+			options: optionsWithout(func(options *Options) { options.Downloader = nil }),
+			wantErr: "incusos downloader is required",
+		},
+		{
+			name:    "missing seed builder",
+			config:  configWithVariant(core.ArtifactFormat("raw")),
+			options: optionsWithout(func(options *Options) { options.SeedBuilder = nil }),
+			wantErr: "incusos seed builder is required",
+		},
+		{
+			name:    "missing image injector",
+			config:  configWithVariant(core.ArtifactFormat("raw")),
+			options: optionsWithout(func(options *Options) { options.ImageInjector = nil }),
+			wantErr: "incusos image injector is required",
 		},
 		{
 			name: "zero variants",
 			config: Config{
 				Variants: map[core.VariantName]incusosschema.Variant{},
 			},
-			catalog: &recordingCatalog{},
+			options: optionsWithout(func(_ *Options) {}),
 			wantErr: "incusos build requires exactly one variant, got 0",
 		},
 		{
@@ -157,42 +213,75 @@ func TestProviderBuildErrors(t *testing.T) {
 					"other":   {},
 				},
 			},
-			catalog: &recordingCatalog{},
+			options: optionsWithout(func(_ *Options) {}),
 			wantErr: "incusos build requires exactly one variant, got 2",
 		},
 		{
 			name:    "unsupported format",
-			config:  configWithVariant(core.ArtifactFormat("qcow2")),
-			catalog: &recordingCatalog{},
-			wantErr: `unsupported incusos artifact format "qcow2"`,
+			config:  configWithVariant(core.ArtifactFormat("iso")),
+			options: optionsWithout(func(_ *Options) {}),
+			wantErr: `unsupported incusos artifact format "iso"`,
 		},
 		{
-			name: "catalog error",
-			config: Config{
-				Variants: map[core.VariantName]incusosschema.Variant{
-					"default": {
-						Artifact: core.ArtifactIntent{
-							Architecture: core.Architecture("amd64"),
-							Format:       core.ArtifactFormat("raw"),
-						},
-					},
-				},
-			},
-			catalog:   &recordingCatalog{err: catalogErr},
+			name:      "catalog error",
+			config:    configWithVariant(core.ArtifactFormat("raw")),
+			options:   optionsWithout(func(options *Options) { options.Catalog = &recordingCatalog{err: catalogErr} }),
 			wantErrIs: catalogErr,
+		},
+		{
+			name:   "download error",
+			config: configWithVariant(core.ArtifactFormat("raw")),
+			options: optionsWithout(
+				func(options *Options) { options.Downloader = &recordingDownloader{err: downloadErr} },
+			),
+			wantErrIs: downloadErr,
+		},
+		{
+			name:   "seed error",
+			config: configWithVariant(core.ArtifactFormat("raw")),
+			options: optionsWithout(
+				func(options *Options) { options.SeedBuilder = &recordingSeedBuilder{err: seedErr} },
+			),
+			wantErrIs: seedErr,
+		},
+		{
+			name:   "inject error",
+			config: configWithVariant(core.ArtifactFormat("raw")),
+			options: optionsWithout(
+				func(options *Options) { options.ImageInjector = &recordingImageInjector{err: injectErr} },
+			),
+			wantErrIs: injectErr,
+		},
+		{
+			name: "absolute artifact filename",
+			config: configWithArtifact(core.ArtifactIntent{
+				Architecture: core.Architecture("amd64"),
+				Format:       core.ArtifactFormat("raw"),
+				Filename:     "/tmp/out.img",
+			}),
+			options: optionsWithout(func(_ *Options) {}),
+			wantErr: `incusos artifact filename must be relative`,
+		},
+		{
+			name: "escaping artifact filename",
+			config: configWithArtifact(core.ArtifactIntent{
+				Architecture: core.Architecture("amd64"),
+				Format:       core.ArtifactFormat("raw"),
+				Filename:     "../out.img",
+			}),
+			options: optionsWithout(func(_ *Options) {}),
+			wantErr: `incusos artifact filename must stay within output directory`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var output bytes.Buffer
-			options := Options{Output: &output}
-			if tt.catalog != nil {
-				options.Catalog = tt.catalog
-			}
-			provider := New(tt.config, options)
+			provider := New(tt.config, tt.options)
 
-			result, err := provider.Build(context.Background(), providers.BuildRequest{})
+			result, err := provider.Build(context.Background(), providers.BuildRequest{
+				Plan:      providers.Plan{Image: core.Image{Name: core.Name("test-image")}},
+				OutputDir: t.TempDir(),
+			})
 
 			require.Error(t, err)
 			if tt.wantErr != "" {
@@ -202,22 +291,37 @@ func TestProviderBuildErrors(t *testing.T) {
 				require.ErrorIs(t, err, tt.wantErrIs)
 			}
 			assert.Empty(t, result)
-			assert.Equal(t, tt.wantOutput, output.String())
 		})
 	}
 }
 
 func configWithVariant(format core.ArtifactFormat) Config {
+	return configWithArtifact(core.ArtifactIntent{
+		Architecture: core.Architecture("amd64"),
+		Format:       format,
+	})
+}
+
+func configWithArtifact(artifact core.ArtifactIntent) Config {
 	return Config{
+		Seed: &incusosschema.Seed{},
 		Variants: map[core.VariantName]incusosschema.Variant{
 			"default": {
-				Artifact: core.ArtifactIntent{
-					Architecture: core.Architecture("amd64"),
-					Format:       format,
-				},
+				Artifact: artifact,
 			},
 		},
 	}
+}
+
+func optionsWithout(mutator func(*Options)) Options {
+	options := Options{
+		Catalog:       &recordingCatalog{asset: ImageAsset{}},
+		Downloader:    &recordingDownloader{},
+		SeedBuilder:   &recordingSeedBuilder{seed: SeedArchive{Data: []byte("seed")}},
+		ImageInjector: &recordingImageInjector{},
+	}
+	mutator(&options)
+	return options
 }
 
 type recordingCatalog struct {
@@ -233,4 +337,67 @@ func (c *recordingCatalog) ResolveImage(_ context.Context, query ImageQuery) (Im
 	}
 
 	return c.asset, nil
+}
+
+type recordingDownloader struct {
+	image  DownloadedImage
+	err    error
+	assets []ImageAsset
+}
+
+func (d *recordingDownloader) DownloadImage(_ context.Context, asset ImageAsset) (DownloadedImage, error) {
+	d.assets = append(d.assets, asset)
+	if d.err != nil {
+		return DownloadedImage{}, d.err
+	}
+
+	return d.image, nil
+}
+
+type recordingSeedBuilder struct {
+	seed    SeedArchive
+	err     error
+	configs []Config
+}
+
+func (b *recordingSeedBuilder) BuildSeed(_ context.Context, config Config) (SeedArchive, error) {
+	b.configs = append(b.configs, config)
+	if b.err != nil {
+		return SeedArchive{}, b.err
+	}
+
+	return b.seed, nil
+}
+
+type recordingImageInjector struct {
+	image CustomizedImage
+	err   error
+	calls []injectCall
+}
+
+type injectCall struct {
+	image      DownloadedImage
+	seed       SeedArchive
+	outputPath string
+}
+
+func (i *recordingImageInjector) InjectSeed(
+	_ context.Context,
+	image DownloadedImage,
+	seed SeedArchive,
+	outputPath string,
+) (CustomizedImage, error) {
+	i.calls = append(i.calls, injectCall{image: image, seed: seed, outputPath: outputPath})
+	if i.err != nil {
+		return CustomizedImage{}, i.err
+	}
+
+	customized := i.image
+	if customized.Source == (DownloadedImage{}) {
+		customized.Source = image
+	}
+	if customized.Path == "" {
+		customized.Path = outputPath
+	}
+	return customized, nil
 }

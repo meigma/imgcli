@@ -26,6 +26,15 @@ type Options struct {
 
 	// IncusOSCatalog resolves IncusOS source images. Nil selects the default CDN catalog.
 	IncusOSCatalog incusos.Catalog
+
+	// IncusOSDownloader retrieves IncusOS source images. Nil selects the default CDN downloader.
+	IncusOSDownloader incusos.Downloader
+
+	// IncusOSSeedBuilder creates IncusOS seed archives. Nil selects the default seed builder.
+	IncusOSSeedBuilder incusos.SeedBuilder
+
+	// IncusOSImageInjector writes IncusOS seed archives into source images. Nil selects the default image injector.
+	IncusOSImageInjector incusos.ImageInjector
 }
 
 func (o Options) version() string {

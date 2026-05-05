@@ -192,33 +192,55 @@ talos: {}
 		assert.Empty(t, result.stderr)
 	})
 
-	t.Run("prints resolved IncusOS image URL", func(t *testing.T) {
+	t.Run("prints customized IncusOS artifact path", func(t *testing.T) {
 		clearIMGCLIEnv(t)
+		outputDir := filepath.Join(t.TempDir(), "out")
 		configPath := writeImageConfig(t, `
 apiVersion: "imgcli.meigma.io/v0alpha1"
 kind:       "ImagePlan"
 image: name: "test-image"
+output: dir: "`+outputDir+`"
 incusos: {
 	defaults: source: channel: "testing"
+	seed: install: {}
 	variants: default: {
 		source: version: "202604261712"
 		artifact: {
 			architecture: "amd64"
-			format:       "raw"
+			format:       "raw.gz"
 		}
 	}
 }
 `)
 		catalog := &testCatalog{
 			asset: incusos.ImageAsset{
-				URL: "https://example.invalid/os/202604261712/x86_64/IncusOS_202604261712.img.gz",
+				URL:    "https://example.invalid/os/202604261712/x86_64/IncusOS_202604261712.img.gz",
+				SHA256: "source-sha",
+				Size:   42,
 			},
 		}
+		downloader := &testDownloader{
+			image: incusos.DownloadedImage{
+				Path:   "/cache/source.img.gz",
+				SHA256: "source-sha",
+				Size:   42,
+			},
+		}
+		seedBuilder := &testSeedBuilder{
+			seed: incusos.SeedArchive{Data: []byte("seed")},
+		}
+		injector := &testImageInjector{}
 
-		result := executeCommand(t, Options{IncusOSCatalog: catalog}, "build", configPath)
+		result := executeCommand(t, Options{
+			IncusOSCatalog:       catalog,
+			IncusOSDownloader:    downloader,
+			IncusOSSeedBuilder:   seedBuilder,
+			IncusOSImageInjector: injector,
+		}, "build", configPath)
 
 		require.NoError(t, result.err)
-		assert.Equal(t, "https://example.invalid/os/202604261712/x86_64/IncusOS_202604261712.img.gz\n", result.stdout)
+		wantOutputPath := filepath.Join(outputDir, "test-image-default-amd64.raw.gz")
+		assert.Equal(t, wantOutputPath+"\n", result.stdout)
 		assert.Empty(t, result.stderr)
 		require.Len(t, catalog.queries, 1)
 		assert.Equal(t, incusos.ImageQuery{
@@ -227,6 +249,10 @@ incusos: {
 			Architecture: core.Architecture("amd64"),
 			Type:         incusos.ImageTypeRaw,
 		}, catalog.queries[0])
+		assert.Equal(t, []incusos.ImageAsset{catalog.asset}, downloader.assets)
+		assert.Len(t, seedBuilder.configs, 1)
+		require.Len(t, injector.calls, 1)
+		assert.Equal(t, wantOutputPath, injector.calls[0].outputPath)
 	})
 }
 
@@ -282,4 +308,51 @@ type testCatalog struct {
 func (c *testCatalog) ResolveImage(_ context.Context, query incusos.ImageQuery) (incusos.ImageAsset, error) {
 	c.queries = append(c.queries, query)
 	return c.asset, nil
+}
+
+type testDownloader struct {
+	image  incusos.DownloadedImage
+	assets []incusos.ImageAsset
+}
+
+func (d *testDownloader) DownloadImage(_ context.Context, asset incusos.ImageAsset) (incusos.DownloadedImage, error) {
+	d.assets = append(d.assets, asset)
+	image := d.image
+	image.Asset = asset
+	return image, nil
+}
+
+type testSeedBuilder struct {
+	seed    incusos.SeedArchive
+	configs []incusos.Config
+}
+
+func (b *testSeedBuilder) BuildSeed(_ context.Context, config incusos.Config) (incusos.SeedArchive, error) {
+	b.configs = append(b.configs, config)
+	return b.seed, nil
+}
+
+type testImageInjector struct {
+	calls []testInjectCall
+}
+
+type testInjectCall struct {
+	image      incusos.DownloadedImage
+	seed       incusos.SeedArchive
+	outputPath string
+}
+
+func (i *testImageInjector) InjectSeed(
+	_ context.Context,
+	image incusos.DownloadedImage,
+	seed incusos.SeedArchive,
+	outputPath string,
+) (incusos.CustomizedImage, error) {
+	i.calls = append(i.calls, testInjectCall{image: image, seed: seed, outputPath: outputPath})
+	return incusos.CustomizedImage{
+		Source: image,
+		Path:   outputPath,
+		Size:   99,
+		SHA256: "custom-sha",
+	}, nil
 }
