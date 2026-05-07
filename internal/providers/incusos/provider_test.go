@@ -147,14 +147,15 @@ func TestProviderBuildCreatesCustomizedImage(t *testing.T) {
 			require.Len(t, result.Plan.Artifacts, 1)
 			assert.Equal(t, result.Plan.Artifacts[0], result.Artifacts[0].Plan)
 			assert.Equal(t, providers.ArtifactPlan{
-				Key:          core.ArtifactKey("default"),
-				Variant:      core.VariantName("default"),
-				Architecture: tt.artifact.Architecture,
-				Format:       tt.artifact.Format,
-				MediaType:    tt.artifact.MediaType,
-				OutputPath:   wantOutputPath,
-				Labels:       tt.artifact.Labels,
-				Annotations:  tt.artifact.Annotations,
+				Key:             core.ArtifactKey("default"),
+				Variant:         core.VariantName("default"),
+				Architecture:    tt.artifact.Architecture,
+				OperatingSystem: "incusos",
+				Format:          tt.artifact.Format,
+				MediaType:       artifactMediaType(tt.artifact),
+				OutputPath:      wantOutputPath,
+				Labels:          tt.artifact.Labels,
+				Annotations:     tt.artifact.Annotations,
 			}, result.Plan.Artifacts[0])
 		})
 	}

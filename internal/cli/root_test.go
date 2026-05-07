@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/meigma/imgcli/internal/providers/incusos"
+	"github.com/meigma/imgcli/internal/publish"
 	publishmocks "github.com/meigma/imgcli/internal/publish/mocks"
 	"github.com/meigma/imgcli/schemas/core"
 )
@@ -272,13 +274,77 @@ func TestPublishCommand(t *testing.T) {
 		assert.Empty(t, result.stderr)
 	})
 
-	t.Run("builds and uploads IncusOS artifact", func(t *testing.T) {
+	t.Run("requires imgsrv token", func(t *testing.T) {
+		clearIMGCLIEnv(t)
+
+		result := executeCommand(
+			t,
+			Options{},
+			"publish",
+			"image.cue",
+			"--imgsrv-url",
+			"https://imgsrv.example.invalid",
+			"--release-version",
+			"v1.0.0",
+		)
+
+		require.Error(t, result.err)
+		require.ErrorContains(t, result.err, "publish requires imgsrv.token")
+		assert.Empty(t, result.stdout)
+		assert.Empty(t, result.stderr)
+	})
+
+	t.Run("requires release version", func(t *testing.T) {
+		clearIMGCLIEnv(t)
+
+		result := executeCommand(
+			t,
+			Options{},
+			"publish",
+			"image.cue",
+			"--imgsrv-url",
+			"https://imgsrv.example.invalid",
+			"--imgsrv-token",
+			"test-token",
+		)
+
+		require.Error(t, result.err)
+		require.ErrorContains(t, result.err, "publish requires publish.version")
+		assert.Empty(t, result.stdout)
+		assert.Empty(t, result.stderr)
+	})
+
+	t.Run("rejects disabled upload readiness wait", func(t *testing.T) {
+		clearIMGCLIEnv(t)
+
+		result := executeCommand(
+			t,
+			Options{},
+			"publish",
+			"image.cue",
+			"--imgsrv-url",
+			"https://imgsrv.example.invalid",
+			"--imgsrv-token",
+			"test-token",
+			"--release-version",
+			"v1.0.0",
+			"--publish-wait=false",
+		)
+
+		require.Error(t, result.err)
+		require.ErrorContains(t, result.err, "publish requires CAS-ready uploads")
+		assert.Empty(t, result.stdout)
+		assert.Empty(t, result.stderr)
+	})
+
+	t.Run("builds and publishes IncusOS release", func(t *testing.T) {
 		clearIMGCLIEnv(t)
 		outputDir := filepath.Join(t.TempDir(), "out")
 		configPath := writeImageConfig(t, `
 apiVersion: "imgcli.meigma.io/v0alpha1"
 kind:       "ImagePlan"
 image: name: "test-image"
+publish: imageName: "published-image"
 output: dir: "`+outputDir+`"
 incusos: {
 	defaults: source: channel: "testing"
@@ -316,11 +382,14 @@ incusos: {
 			sha256: "abc123",
 		}
 		uploads := publishmocks.NewMockUploadsClient(t)
+		publishCatalog := publishmocks.NewMockCatalogClient(t)
+		mediaTypeHint := "application/gzip"
 		filenameHint := filepath.Base(wantOutputPath)
 		uploads.EXPECT().
 			BeginUpload(mock.Anything, imgsrv.BeginUploadRequest{
 				ExpectedDigest:    "sha256:abc123",
 				ExpectedSizeBytes: int64(len(artifactBody)),
+				MediaTypeHint:     &mediaTypeHint,
 				FilenameHint:      &filenameHint,
 			}).
 			Return(imgsrv.UploadSession{ID: "upload-1", State: imgsrv.UploadStateCreated}, nil).
@@ -337,6 +406,45 @@ incusos: {
 			}).
 			Return(imgsrv.UploadSession{ID: "upload-1", State: imgsrv.UploadStateReady}, nil).
 			Once()
+		publishCatalog.EXPECT().
+			CreateImage(mock.Anything, imgsrv.CreateImageRequest{Name: "published-image"}).
+			Return(imgsrv.Image{Name: "published-image"}, nil).
+			Once()
+		publishCatalog.EXPECT().
+			CreateDraftVersion(mock.Anything, "published-image", imgsrv.CreateDraftVersionRequest{Version: "v1.0.0"}).
+			Return(imgsrv.ImageVersion{Version: "v1.0.0", State: imgsrv.ImageVersionStateDraft}, nil).
+			Once()
+		publishCatalog.EXPECT().
+			AddArtifact(mock.Anything, "published-image", "v1.0.0", imgsrv.AddArtifactRequest{
+				OperatingSystem:      "incusos",
+				Architecture:         "x86_64",
+				Format:               imgsrv.ArtifactFormatRawGZ,
+				PrimaryBlobDigest:    "sha256:abc123",
+				PrimaryBlobSizeBytes: int64(len(artifactBody)),
+				PrimaryMediaType:     "application/gzip",
+			}).
+			Return(imgsrv.Artifact{
+				ID:                   "artifact-1",
+				OperatingSystem:      "incusos",
+				Architecture:         "x86_64",
+				Format:               imgsrv.ArtifactFormatRawGZ,
+				PrimaryBlobDigest:    "sha256:abc123",
+				PrimaryBlobSizeBytes: int64(len(artifactBody)),
+				PrimaryMediaType:     "application/gzip",
+			}, nil).
+			Once()
+		publishCatalog.EXPECT().
+			PublishVersion(mock.Anything, "published-image", "v1.0.0").
+			Return(imgsrv.ImageVersion{Version: "v1.0.0", State: imgsrv.ImageVersionStatePublished}, nil).
+			Once()
+		publishCatalog.EXPECT().
+			PutAlias(mock.Anything, "published-image", "latest", imgsrv.PutAliasRequest{Version: "v1.0.0"}).
+			Return(imgsrv.Alias{Alias: "latest", Version: "v1.0.0"}, nil).
+			Once()
+		publishCatalog.EXPECT().
+			PutAlias(mock.Anything, "published-image", "prod", imgsrv.PutAliasRequest{Version: "v1.0.0"}).
+			Return(imgsrv.Alias{Alias: "prod", Version: "v1.0.0"}, nil).
+			Once()
 
 		result := executeCommand(t, Options{
 			IncusOSCatalog:       catalog,
@@ -344,11 +452,46 @@ incusos: {
 			IncusOSSeedBuilder:   seedBuilder,
 			IncusOSImageInjector: injector,
 			ImgsrvUploadsClient:  uploads,
-		}, "--imgsrv-url", "https://imgsrv.example.invalid", "publish", configPath)
+			ImgsrvCatalogClient:  publishCatalog,
+		},
+			"publish",
+			configPath,
+			"--imgsrv-url",
+			"https://imgsrv.example.invalid",
+			"--imgsrv-token",
+			"test-token",
+			"--release-version",
+			"v1.0.0",
+			"--alias",
+			"latest",
+			"--alias",
+			"prod",
+		)
 
 		require.NoError(t, result.err)
-		assert.Equal(t, "sha256:abc123\n", result.stdout)
 		assert.Empty(t, result.stderr)
+		var manifest publish.ReleaseResult
+		require.NoError(t, json.Unmarshal([]byte(result.stdout), &manifest))
+		assert.Equal(t, publish.ReleaseResult{
+			Image:   "published-image",
+			Version: "v1.0.0",
+			State:   imgsrv.ImageVersionStatePublished,
+			Aliases: []string{"latest", "prod"},
+			Artifacts: []publish.PublishedReleaseArtifact{
+				{
+					ArtifactKey:      "default",
+					Variant:          "default",
+					LocalPath:        wantOutputPath,
+					ServerArtifactID: "artifact-1",
+					OperatingSystem:  "incusos",
+					Architecture:     "x86_64",
+					Format:           imgsrv.ArtifactFormatRawGZ,
+					Digest:           "sha256:abc123",
+					Size:             int64(len(artifactBody)),
+					MediaType:        "application/gzip",
+				},
+			},
+		}, manifest)
 		require.Len(t, catalog.queries, 1)
 		assert.Equal(t, incusos.ImageQuery{
 			Channel:      incusos.ChannelTesting,
@@ -380,12 +523,16 @@ func TestPublishConfigIsPublishOnly(t *testing.T) {
 		result := executeCommand(
 			t,
 			Options{},
-			"--imgsrv-url",
-			"https://imgsrv.example.invalid",
-			"--publish-part-size",
-			"1MB",
 			"publish",
 			"image.cue",
+			"--imgsrv-url",
+			"https://imgsrv.example.invalid",
+			"--imgsrv-token",
+			"test-token",
+			"--release-version",
+			"v1.0.0",
+			"--publish-part-size",
+			"1MB",
 		)
 
 		require.Error(t, result.err)
@@ -411,12 +558,16 @@ func TestPublishConfigIsPublishOnly(t *testing.T) {
 		result := executeCommand(
 			t,
 			Options{},
-			"--imgsrv-url",
-			"https://imgsrv.example.invalid",
-			"--publish-timeout",
-			"soon",
 			"publish",
 			"image.cue",
+			"--imgsrv-url",
+			"https://imgsrv.example.invalid",
+			"--imgsrv-token",
+			"test-token",
+			"--release-version",
+			"v1.0.0",
+			"--publish-timeout",
+			"soon",
 		)
 
 		require.Error(t, result.err)
@@ -463,6 +614,7 @@ func clearIMGCLIEnv(t *testing.T) {
 		"IMGCLI_PUBLISH_PART_SIZE",
 		"IMGCLI_PUBLISH_POLL_INTERVAL",
 		"IMGCLI_PUBLISH_TIMEOUT",
+		"IMGCLI_PUBLISH_VERSION",
 		"IMGCLI_PUBLISH_WAIT",
 	} {
 		t.Setenv(key, "")

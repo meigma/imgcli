@@ -79,6 +79,38 @@ func TestUploaderUploadsMultipartArtifact(t *testing.T) {
 	assert.Equal(t, imgsrv.UploadStateCompleted, result.State)
 }
 
+func TestUploaderSkipsMultipartUploadWhenDigestIsReady(t *testing.T) {
+	uploads := mocks.NewMockUploadsClient(t)
+	body := bytes.Repeat([]byte("a"), int(publish.MinPartSizeBytes))
+	path := writePublishTestArtifact(t, "artifact.raw.gz", body)
+	filenameHint := "artifact.raw.gz"
+	uploads.EXPECT().
+		BeginUpload(mock.Anything, imgsrv.BeginUploadRequest{
+			ExpectedDigest:    "sha256:abc123",
+			ExpectedSizeBytes: int64(len(body)),
+			FilenameHint:      &filenameHint,
+		}).
+		Return(imgsrv.UploadSession{ID: "upload-1", State: imgsrv.UploadStateReady}, nil).
+		Once()
+
+	uploader := newPublishTestUploader(t, uploads, publish.Options{
+		PartSizeBytes: publish.MinPartSizeBytes,
+		Wait:          true,
+		Timeout:       time.Second,
+		PollInterval:  time.Nanosecond,
+	})
+	result, err := uploader.UploadArtifact(context.Background(), publish.Artifact{
+		Path:   path,
+		Size:   int64(len(body)),
+		SHA256: "abc123",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, imgsrv.Digest("sha256:abc123"), result.Digest)
+	assert.Equal(t, imgsrv.UploadID("upload-1"), result.UploadID)
+	assert.Equal(t, imgsrv.UploadStateReady, result.State)
+}
+
 func TestUploaderWaitsUntilReady(t *testing.T) {
 	uploads := mocks.NewMockUploadsClient(t)
 	body := bytes.Repeat([]byte("a"), int(publish.MinPartSizeBytes))

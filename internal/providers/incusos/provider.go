@@ -119,14 +119,15 @@ func (p *Provider) Build(ctx context.Context, req providers.BuildRequest) (provi
 	}
 
 	artifactPlan := providers.ArtifactPlan{
-		Key:          core.ArtifactKey(variantName),
-		Variant:      variantName,
-		Architecture: variant.Artifact.Architecture,
-		Format:       variant.Artifact.Format,
-		MediaType:    variant.Artifact.MediaType,
-		OutputPath:   outputPath,
-		Labels:       variant.Artifact.Labels,
-		Annotations:  variant.Artifact.Annotations,
+		Key:             core.ArtifactKey(variantName),
+		Variant:         variantName,
+		Architecture:    variant.Artifact.Architecture,
+		OperatingSystem: artifactOperatingSystem(variant.Artifact),
+		Format:          variant.Artifact.Format,
+		MediaType:       artifactMediaType(variant.Artifact),
+		OutputPath:      outputPath,
+		Labels:          variant.Artifact.Labels,
+		Annotations:     variant.Artifact.Annotations,
 	}
 	plan := req.Plan
 	plan.Provider = providerName
@@ -232,4 +233,25 @@ func imageTypeForFormat(format core.ArtifactFormat) (ImageType, error) {
 	default:
 		return "", fmt.Errorf("unsupported incusos artifact format %q", format)
 	}
+}
+
+func artifactMediaType(artifact core.ArtifactIntent) string {
+	if strings.TrimSpace(artifact.MediaType) != "" {
+		return artifact.MediaType
+	}
+
+	switch artifact.Format {
+	case "raw.gz":
+		return "application/gzip"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+func artifactOperatingSystem(artifact core.ArtifactIntent) string {
+	if strings.TrimSpace(artifact.Os) != "" {
+		return artifact.Os
+	}
+
+	return string(providerName)
 }

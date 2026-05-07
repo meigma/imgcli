@@ -1,7 +1,11 @@
 package cli
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"strings"
 
 	imgsrv "github.com/meigma/imgsrv/client"
 	"github.com/spf13/cobra"
@@ -9,6 +13,8 @@ import (
 
 	"github.com/meigma/imgcli/internal/providers"
 	"github.com/meigma/imgcli/internal/publish"
+	imgschemas "github.com/meigma/imgcli/schemas"
+	"github.com/meigma/imgcli/schemas/core"
 )
 
 func newPublishCommand(rt *runtime) *cobra.Command {
@@ -21,18 +27,22 @@ func newPublishCommand(rt *runtime) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			aliases, err := publishAliases(cmd)
+			if err != nil {
+				return err
+			}
 
 			config, err := loadImageConfig(args[0])
 			if err != nil {
 				return err
 			}
 
-			result, err := rt.runIncusOSBuild(cmd.Context(), config)
+			buildResult, err := rt.runIncusOSBuild(cmd.Context(), config)
 			if err != nil {
 				return err
 			}
 
-			uploadsClient, err := rt.imgsrvUploadsClient(pubConfig)
+			uploadsClient, catalogClient, err := rt.imgsrvPublishClients(pubConfig)
 			if err != nil {
 				return err
 			}
@@ -47,28 +57,29 @@ func newPublishCommand(rt *runtime) *cobra.Command {
 				return err
 			}
 
-			digests := make([]string, 0, len(result.Artifacts))
-			for _, artifact := range result.Artifacts {
-				uploadResult, err := uploader.UploadArtifact(cmd.Context(), publishArtifact(artifact))
-				if err != nil {
-					return err
-				}
-				digests = append(digests, uploadResult.Digest.String())
+			publisher, err := publish.NewPublisher(catalogClient, uploader)
+			if err != nil {
+				return err
 			}
 
-			for _, digest := range digests {
-				if _, err := fmt.Fprintln(rt.opts.stdout(), digest); err != nil {
-					return fmt.Errorf("write published artifact digest: %w", err)
-				}
+			request, err := publishReleaseRequest(config, buildResult, pubConfig.version, aliases)
+			if err != nil {
+				return err
+			}
+			result, err := publisher.PublishRelease(cmd.Context(), request)
+			if err != nil {
+				return err
 			}
 
-			return nil
+			return printPublishResult(rt.opts.stdout(), result)
 		},
 	}
 
 	flags := cmd.Flags()
 	flags.String(flagImgsrvURL, "", "imgsrv API base URL")
 	flags.String(flagImgsrvToken, "", "imgsrv bearer token")
+	flags.String(flagReleaseVersion, "", "imgsrv image version to publish")
+	flags.StringArray(flagAlias, nil, "imgsrv alias to point at the published version")
 	flags.String(flagPublishPartSize, defaultPublishPartSize, "Multipart upload part size")
 	flags.Bool(flagPublishWait, true, "Wait until imgsrv marks the upload ready")
 	flags.String(flagPublishTimeout, defaultPublishTimeout, "Maximum time to wait for imgsrv readiness")
@@ -76,6 +87,7 @@ func newPublishCommand(rt *runtime) *cobra.Command {
 
 	mustBindPublishFlag(rt, flags, KeyImgsrvURL, flagImgsrvURL)
 	mustBindPublishFlag(rt, flags, KeyImgsrvToken, flagImgsrvToken)
+	mustBindPublishFlag(rt, flags, KeyPublishVersion, flagReleaseVersion)
 	mustBindPublishFlag(rt, flags, KeyPublishPartSize, flagPublishPartSize)
 	mustBindPublishFlag(rt, flags, KeyPublishWait, flagPublishWait)
 	mustBindPublishFlag(rt, flags, KeyPublishTimeout, flagPublishTimeout)
@@ -90,9 +102,13 @@ func mustBindPublishFlag(rt *runtime, flags *pflag.FlagSet, key string, flagName
 	}
 }
 
-func (rt *runtime) imgsrvUploadsClient(cfg publishConfig) (publish.UploadsClient, error) {
-	if rt.opts.ImgsrvUploadsClient != nil {
-		return rt.opts.ImgsrvUploadsClient, nil
+func (rt *runtime) imgsrvPublishClients(
+	cfg publishConfig,
+) (publish.UploadsClient, publish.CatalogClient, error) {
+	uploads := rt.opts.ImgsrvUploadsClient
+	catalog := rt.opts.ImgsrvCatalogClient
+	if uploads != nil && catalog != nil {
+		return uploads, catalog, nil
 	}
 
 	client, err := imgsrv.New(imgsrv.Options{
@@ -101,17 +117,111 @@ func (rt *runtime) imgsrvUploadsClient(cfg publishConfig) (publish.UploadsClient
 		UserAgent:   "imgcli/" + rt.opts.version(),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("configure imgsrv client: %w", err)
+		return nil, nil, fmt.Errorf("configure imgsrv client: %w", err)
 	}
 
-	return client.Uploads(), nil
+	if uploads == nil {
+		uploads = client.Uploads()
+	}
+	if catalog == nil {
+		catalog = client.Catalog()
+	}
+
+	return uploads, catalog, nil
 }
 
-func publishArtifact(artifact providers.BuiltArtifact) publish.Artifact {
-	return publish.Artifact{
-		Path:      artifact.Path,
-		Size:      artifact.Size,
-		SHA256:    artifact.SHA256,
-		MediaType: artifact.Plan.MediaType,
+func publishAliases(cmd *cobra.Command) ([]string, error) {
+	values, err := cmd.Flags().GetStringArray(flagAlias)
+	if err != nil {
+		return nil, fmt.Errorf("read publish aliases: %w", err)
 	}
+
+	aliases := make([]string, 0, len(values))
+	for _, value := range values {
+		alias := strings.TrimSpace(value)
+		if alias == "" {
+			return nil, errors.New("publish alias must not be empty")
+		}
+		aliases = append(aliases, alias)
+	}
+
+	return aliases, nil
+}
+
+func publishReleaseRequest(
+	config imgschemas.Config,
+	buildResult providers.BuildResult,
+	version string,
+	aliases []string,
+) (publish.ReleaseRequest, error) {
+	request := publish.ReleaseRequest{
+		ImageName:        publishImageName(config),
+		ImageDescription: config.Image.Description,
+		Version:          version,
+		Aliases:          aliases,
+		Artifacts:        make([]publish.ReleaseArtifact, 0, len(buildResult.Artifacts)),
+	}
+
+	for _, artifact := range buildResult.Artifacts {
+		format, err := imgsrvArtifactFormat(artifact.Plan.Format)
+		if err != nil {
+			return publish.ReleaseRequest{}, err
+		}
+
+		request.Artifacts = append(request.Artifacts, publish.ReleaseArtifact{
+			Key:             string(artifact.Plan.Key),
+			Variant:         string(artifact.Plan.Variant),
+			LocalPath:       artifact.Path,
+			OperatingSystem: artifact.Plan.OperatingSystem,
+			Architecture:    imgsrvArchitecture(artifact.Plan.Architecture),
+			Format:          format,
+			Digest:          artifact.SHA256,
+			Size:            artifact.Size,
+			MediaType:       artifact.Plan.MediaType,
+		})
+	}
+
+	return request, nil
+}
+
+func publishImageName(config imgschemas.Config) string {
+	if config.Publish != nil {
+		imageName := strings.TrimSpace(string(config.Publish.ImageName))
+		if imageName != "" {
+			return imageName
+		}
+	}
+
+	return string(config.Image.Name)
+}
+
+func imgsrvArchitecture(architecture core.Architecture) string {
+	switch architecture {
+	case "amd64":
+		return "x86_64"
+	case "arm64":
+		return "aarch64"
+	default:
+		return string(architecture)
+	}
+}
+
+func imgsrvArtifactFormat(format core.ArtifactFormat) (imgsrv.ArtifactFormat, error) {
+	switch format {
+	case "raw":
+		return imgsrv.ArtifactFormatRaw, nil
+	case "raw.gz":
+		return imgsrv.ArtifactFormatRawGZ, nil
+	default:
+		return "", fmt.Errorf("unsupported imgsrv artifact format %q", format)
+	}
+}
+
+func printPublishResult(output io.Writer, result publish.ReleaseResult) error {
+	encoder := json.NewEncoder(output)
+	if err := encoder.Encode(result); err != nil {
+		return fmt.Errorf("write published release manifest: %w", err)
+	}
+
+	return nil
 }

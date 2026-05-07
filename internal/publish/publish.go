@@ -1,4 +1,4 @@
-// Package publish uploads built image artifacts to imgsrv.
+// Package publish publishes built image artifacts to imgsrv.
 package publish
 
 import (
@@ -137,6 +137,16 @@ func (u *Uploader) UploadArtifact(ctx context.Context, artifact Artifact) (Resul
 	session, err := u.client.BeginUpload(ctx, request)
 	if err != nil {
 		return Result{}, fmt.Errorf("begin imgsrv upload for %s: %w", digest, err)
+	}
+	if session.State == imgsrv.UploadStateReady {
+		return Result{
+			Digest:   digest,
+			UploadID: session.ID,
+			State:    session.State,
+		}, nil
+	}
+	if stateErr := terminalStateError(session); stateErr != nil {
+		return Result{}, stateErr
 	}
 	uploadID := session.ID.String()
 

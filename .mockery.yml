@@ -20,3 +20,7 @@ packages:
       structname: MockUploadsClient
     interfaces:
       UploadsClient:
+      CatalogClient:
+        config:
+          filename: catalog_client.go
+          structname: MockCatalogClient

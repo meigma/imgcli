@@ -34,6 +34,8 @@ const (
 	KeyImgsrvURL = "imgsrv.url"
 	// KeyImgsrvToken is the Viper key for the optional imgsrv bearer token used by publish.
 	KeyImgsrvToken = "imgsrv.token" // #nosec G101 -- config key name, not a credential value.
+	// KeyPublishVersion is the Viper key for the imgsrv image version created by publish.
+	KeyPublishVersion = "publish.version"
 	// KeyPublishPartSize is the Viper key for the publish multipart upload part size.
 	KeyPublishPartSize = "publish.part-size"
 	// KeyPublishWait is the Viper key for waiting until uploaded blobs become CAS-ready.
@@ -54,6 +56,8 @@ const (
 
 	flagImgsrvURL           = "imgsrv-url"
 	flagImgsrvToken         = "imgsrv-token" // #nosec G101 -- flag name, not a credential value.
+	flagReleaseVersion      = "release-version"
+	flagAlias               = "alias"
 	flagPublishPartSize     = "publish-part-size"
 	flagPublishWait         = "publish-wait"
 	flagPublishTimeout      = "publish-timeout"
@@ -102,6 +106,7 @@ type Config struct {
 type publishConfig struct {
 	imgsrvURL     string
 	imgsrvToken   string
+	version       string
 	partSizeBytes int64
 	wait          bool
 	timeout       time.Duration
@@ -120,6 +125,7 @@ func configureViper(vp *viper.Viper) {
 	vp.SetDefault(KeyCacheMaxSize, defaultCacheMaxSize)
 	vp.SetDefault(KeyImgsrvURL, "")
 	vp.SetDefault(KeyImgsrvToken, "")
+	vp.SetDefault(KeyPublishVersion, "")
 	vp.SetDefault(KeyPublishPartSize, defaultPublishPartSize)
 	vp.SetDefault(KeyPublishWait, true)
 	vp.SetDefault(KeyPublishTimeout, defaultPublishTimeout)
@@ -290,6 +296,7 @@ func loadPublishConfig(vp *viper.Viper) (publishConfig, error) {
 	cfg := publishConfig{
 		imgsrvURL:     strings.TrimSpace(vp.GetString(KeyImgsrvURL)),
 		imgsrvToken:   strings.TrimSpace(vp.GetString(KeyImgsrvToken)),
+		version:       strings.TrimSpace(vp.GetString(KeyPublishVersion)),
 		partSizeBytes: partSizeBytes,
 		wait:          vp.GetBool(KeyPublishWait),
 		timeout:       timeout,
@@ -370,6 +377,19 @@ func validateConfig(cfg Config) error {
 func validatePublishConfig(cfg publishConfig) error {
 	if cfg.imgsrvURL == "" {
 		return errors.New("publish requires imgsrv.url: set --imgsrv-url, IMGCLI_IMGSRV_URL, or config imgsrv.url")
+	}
+	if cfg.imgsrvToken == "" {
+		return errors.New(
+			"publish requires imgsrv.token: set --imgsrv-token, IMGCLI_IMGSRV_TOKEN, or config imgsrv.token",
+		)
+	}
+	if cfg.version == "" {
+		return errors.New(
+			"publish requires publish.version: set --release-version, IMGCLI_PUBLISH_VERSION, or config publish.version",
+		)
+	}
+	if !cfg.wait {
+		return errors.New("publish requires CAS-ready uploads: --publish-wait=false is not supported")
 	}
 	if cfg.partSizeBytes < minPublishPartSizeBytes {
 		return fmt.Errorf(
