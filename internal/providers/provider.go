@@ -71,6 +71,9 @@ type ArtifactPlan struct {
 	// Architecture is the target architecture for this artifact.
 	Architecture core.Architecture
 
+	// OperatingSystem is the artifact operating-system token published to imgsrv.
+	OperatingSystem string
+
 	// Format is the artifact file format.
 	Format core.ArtifactFormat
 

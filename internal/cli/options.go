@@ -39,6 +39,9 @@ type Options struct {
 
 	// ImgsrvUploadsClient uploads artifacts to imgsrv. Nil selects the HTTP SDK client.
 	ImgsrvUploadsClient publish.UploadsClient
+
+	// ImgsrvCatalogClient publishes artifacts into the imgsrv catalog. Nil selects the HTTP SDK client.
+	ImgsrvCatalogClient publish.CatalogClient
 }
 
 func (o Options) version() string {

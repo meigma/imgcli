@@ -85,6 +85,17 @@ tasks:
       - '@group(go-config)'
       - '@group(go-sources)'
 
+  test-integration:
+    deps:
+      - 'root:schemas-generate-check'
+    command: 'go test -count 1 -tags integration ./internal/integration'
+    toolchains: ['go']
+    inputs:
+      - '@group(go-config)'
+      - '@group(go-sources)'
+    options:
+      cache: false
+
   schemas-mod-check:
     script: 'cd schemas && proto run cue -- mod tidy --check'
     inputs:
@@ -137,6 +148,7 @@ tasks:
       - 'root:lint'
       - 'root:build'
       - 'root:test'
+      - 'root:test-integration'
       - 'root:schemas-mod-check'
       - 'root:schemas-vet'
       - 'root:schemas-test'
