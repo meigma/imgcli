@@ -37,6 +37,9 @@ type Options struct {
 	// IncusOSImageInjector writes IncusOS seed archives into source images. Nil selects the default image injector.
 	IncusOSImageInjector incusos.ImageInjector
 
+	// IncusOSCDNBaseURL overrides the default IncusOS CDN URL. Empty selects the upstream CDN.
+	IncusOSCDNBaseURL string
+
 	// ImgsrvUploadsClient uploads artifacts to imgsrv. Nil selects the HTTP SDK client.
 	ImgsrvUploadsClient publish.UploadsClient
 

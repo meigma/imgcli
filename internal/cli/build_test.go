@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/meigma/imgcli/internal/cache"
 	incusosprovider "github.com/meigma/imgcli/internal/providers/incusos"
+	"github.com/meigma/imgcli/schemas/core"
 )
 
 func TestWithLockedCachePrunesAfterSuccess(t *testing.T) {
@@ -26,7 +29,7 @@ func TestWithLockedCachePrunesAfterSuccess(t *testing.T) {
 	err := withLockedCache(context.Background(), Config{
 		CacheDir:          root,
 		CacheMaxSizeBytes: 4,
-	}, func(catalog incusosprovider.Catalog, downloader incusosprovider.Downloader) error {
+	}, "", func(catalog incusosprovider.Catalog, downloader incusosprovider.Downloader) error {
 		require.NotNil(t, catalog)
 		require.NotNil(t, downloader)
 		assertCacheLocked(t, root)
@@ -50,7 +53,7 @@ func TestWithLockedCacheSkipsPruneAfterBuildError(t *testing.T) {
 	err := withLockedCache(context.Background(), Config{
 		CacheDir:          root,
 		CacheMaxSizeBytes: 1,
-	}, func(_ incusosprovider.Catalog, _ incusosprovider.Downloader) error {
+	}, "", func(_ incusosprovider.Catalog, _ incusosprovider.Downloader) error {
 		assertCacheLocked(t, root)
 		writeBuildTestCachedBlob(t, root, []byte("old!"), time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC))
 		return buildErr
@@ -59,6 +62,47 @@ func TestWithLockedCacheSkipsPruneAfterBuildError(t *testing.T) {
 	require.ErrorIs(t, err, buildErr)
 	assert.FileExists(t, buildTestCachedBlobPath(root, oldDigest))
 	assertCacheUnlocked(t, root)
+}
+
+func TestWithLockedCacheUsesIncusOSCDNBaseURL(t *testing.T) {
+	clearIMGCLIEnv(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/index.json", r.URL.Path)
+		_, err := w.Write([]byte(`{
+			"updates": [{
+				"channels": ["testing"],
+				"version": "202604261712",
+				"url": "/202604261712",
+				"files": [{
+					"architecture": "x86_64",
+					"component": "os",
+					"filename": "x86_64/IncusOS_202604261712.img.gz",
+					"sha256": "test-sha",
+					"size": 42,
+					"type": "image-raw"
+				}]
+			}]
+		}`))
+		assert.NoError(t, err)
+	}))
+	t.Cleanup(server.Close)
+
+	err := withLockedCache(context.Background(), Config{
+		CacheDir:          t.TempDir(),
+		CacheMaxSizeBytes: 0,
+	}, server.URL, func(catalog incusosprovider.Catalog, _ incusosprovider.Downloader) error {
+		asset, resolveErr := catalog.ResolveImage(context.Background(), incusosprovider.ImageQuery{
+			Channel:      incusosprovider.ChannelTesting,
+			Version:      incusosprovider.Version("202604261712"),
+			Architecture: core.Architecture("amd64"),
+			Type:         incusosprovider.ImageTypeRaw,
+		})
+		require.NoError(t, resolveErr)
+		assert.Equal(t, server.URL+"/202604261712/x86_64/IncusOS_202604261712.img.gz", asset.URL)
+		return nil
+	})
+
+	require.NoError(t, err)
 }
 
 func assertCacheLocked(t *testing.T, root string) {
