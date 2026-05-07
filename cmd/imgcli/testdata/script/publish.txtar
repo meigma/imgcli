@@ -1,0 +1,30 @@
+# Publish an IncusOS image through a local CDN fixture into imgsrv.
+exec imgcli publish image.cue --imgsrv-url $IMGSRV_URL --imgsrv-token $IMGSRV_TOKEN --release-version $PUBLISH_VERSION --alias latest --publish-timeout 10s --publish-poll-interval 10ms
+stdout '"image":"script-image"'
+stdout '"version":"2026.05.06"'
+stdout '"state":"published"'
+stdout '"aliases":\["latest"\]'
+stdout '"operatingSystem":"incusos"'
+stdout '"architecture":"x86_64"'
+stdout '"format":"raw.gz"'
+! stderr .
+exists out/script-image-default-amd64.raw.gz
+cp stdout publish.json
+verify-publish publish.json script-image 2026.05.06 latest
+
+-- image.cue --
+apiVersion: "imgcli.meigma.io/v0alpha1"
+kind:       "ImagePlan"
+image: name: "script-image"
+output: dir: "out"
+incusos: {
+	defaults: source: channel: "testing"
+	seed: install: {}
+	variants: default: {
+		source: version: "202604261712"
+		artifact: {
+			architecture: "amd64"
+			format:       "raw.gz"
+		}
+	}
+}

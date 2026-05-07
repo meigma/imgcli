@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -95,7 +96,7 @@ func (rt *runtime) runIncusOSBuild(
 ) (providers.BuildResult, error) {
 	if rt.usesDefaultIncusOSCache() {
 		var result providers.BuildResult
-		err := withLockedCache(ctx, rt.config, func(
+		err := withLockedCache(ctx, rt.config, rt.opts.IncusOSCDNBaseURL, func(
 			catalog incusosprovider.Catalog,
 			downloader incusosprovider.Downloader,
 		) error {
@@ -174,6 +175,7 @@ func newCacheStore(cfg Config) (*cache.DiskStore, error) {
 func withLockedCache(
 	ctx context.Context,
 	cfg Config,
+	incusOSCDNBaseURL string,
 	run func(catalog incusosprovider.Catalog, downloader incusosprovider.Downloader) error,
 ) (err error) {
 	cacheStore, err := newCacheStore(cfg)
@@ -191,7 +193,13 @@ func withLockedCache(
 		}
 	}()
 
-	client := cdn.NewClient(cdn.WithCacheService(cacheStore))
+	cdnOptions := []cdn.Option{
+		cdn.WithCacheService(cacheStore),
+	}
+	if strings.TrimSpace(incusOSCDNBaseURL) != "" {
+		cdnOptions = append(cdnOptions, cdn.WithBaseURL(incusOSCDNBaseURL))
+	}
+	client := cdn.NewClient(cdnOptions...)
 	if err := run(client, client); err != nil {
 		return err
 	}

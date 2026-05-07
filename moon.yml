@@ -27,6 +27,8 @@ fileGroups:
   go-sources:
     - 'cmd/**/*.go'
     - 'internal/**/*.go'
+  test-fixtures:
+    - 'cmd/**/testdata/**/*'
   schema-config:
     - '.prototools'
     - '.moon/proto/cue.toml'
@@ -88,11 +90,12 @@ tasks:
   test-integration:
     deps:
       - 'root:schemas-generate-check'
-    command: 'go test -count 1 -tags integration ./internal/integration'
+    command: 'go test -count 1 -tags integration ./cmd/imgcli'
     toolchains: ['go']
     inputs:
       - '@group(go-config)'
       - '@group(go-sources)'
+      - '@group(test-fixtures)'
     options:
       cache: false
 
