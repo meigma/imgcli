@@ -88,6 +88,24 @@ type ArtifactPlan struct {
 
 	// Annotations are provider or user annotations copied to artifact metadata.
 	Annotations map[string]string
+
+	// Source is the upstream artifact selected by provider planning.
+	Source *SourceMetadata
+}
+
+// SourceMetadata describes the upstream source asset selected for an artifact.
+type SourceMetadata struct {
+	// Version is the upstream release version that contains this source asset.
+	Version string
+
+	// URL is the upstream source asset URL.
+	URL string
+
+	// SHA256 is the expected upstream source SHA-256 digest in lowercase hex.
+	SHA256 string
+
+	// Size is the upstream source asset size in bytes.
+	Size int64
 }
 
 // BuildResult describes artifacts produced by a provider build.

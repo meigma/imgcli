@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/meigma/imgcli/internal/providers"
 	incusosprovider "github.com/meigma/imgcli/internal/providers/incusos"
+	"github.com/meigma/imgcli/internal/providers/incusos/cdn"
 	imgschemas "github.com/meigma/imgcli/schemas"
 	"github.com/meigma/imgcli/schemas/core"
 )
@@ -25,7 +27,7 @@ func newPlanCommand(rt *runtime) *cobra.Command {
 				return err
 			}
 
-			plan, err := runIncusOSPlan(cmd.Context(), config)
+			plan, err := rt.runIncusOSPlan(cmd.Context(), config)
 			if err != nil {
 				return err
 			}
@@ -35,16 +37,31 @@ func newPlanCommand(rt *runtime) *cobra.Command {
 	}
 }
 
-func runIncusOSPlan(
+func (rt *runtime) runIncusOSPlan(
 	ctx context.Context,
 	config imgschemas.Config,
 ) (providers.Plan, error) {
-	provider := incusosprovider.New(*config.Incusos, incusosprovider.Options{})
+	provider := incusosprovider.New(*config.Incusos, incusosprovider.Options{
+		Catalog: rt.incusOSPlanCatalog(),
+	})
 
 	return provider.Plan(ctx, providers.PlanRequest{
 		Image:     config.Image,
 		OutputDir: buildOutputDir(config.Output),
 	})
+}
+
+func (rt *runtime) incusOSPlanCatalog() incusosprovider.Catalog {
+	if rt.opts.IncusOSCatalog != nil {
+		return rt.opts.IncusOSCatalog
+	}
+
+	options := []cdn.Option{}
+	if strings.TrimSpace(rt.opts.IncusOSCDNBaseURL) != "" {
+		options = append(options, cdn.WithBaseURL(rt.opts.IncusOSCDNBaseURL))
+	}
+
+	return cdn.NewClient(options...)
 }
 
 func printResolvedPlan(output io.Writer, plan providers.Plan) error {
@@ -86,5 +103,26 @@ func resolvedArtifactForOutput(plan providers.Plan, artifact providers.ArtifactP
 		Path:         artifact.OutputPath,
 		Labels:       artifact.Labels,
 		Annotations:  artifact.Annotations,
+		Source:       resolvedArtifactSourceForOutput(artifact),
 	}
+}
+
+func resolvedArtifactSourceForOutput(artifact providers.ArtifactPlan) *core.ResolvedArtifactSource {
+	if artifact.Source == nil {
+		return nil
+	}
+
+	return &core.ResolvedArtifactSource{
+		Version: artifact.Source.Version,
+		URL:     artifact.Source.URL,
+		Digest:  qualifiedSHA256(artifact.Source.SHA256),
+		Size:    artifact.Source.Size,
+	}
+}
+
+func qualifiedSHA256(sha256Digest string) string {
+	if strings.HasPrefix(sha256Digest, "sha256:") {
+		return sha256Digest
+	}
+	return "sha256:" + sha256Digest
 }

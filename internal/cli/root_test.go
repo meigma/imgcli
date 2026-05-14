@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -178,13 +179,42 @@ incusos: {
 }
 `)
 
-		result := executeCommand(t, Options{}, "--cache-dir", cacheDir, "plan", configPath)
+		catalog := &testCatalog{
+			asset: incusos.ImageAsset{
+				Version:      incusos.Version("202604261712"),
+				Architecture: core.Architecture("amd64"),
+				Type:         incusos.ImageTypeRaw,
+				URL:          "https://example.invalid/os/202604261712/x86_64/IncusOS_202604261712.img.gz",
+				SHA256:       "source-sha",
+				Size:         42,
+			},
+		}
+
+		result := executeCommand(t, Options{IncusOSCatalog: catalog}, "--cache-dir", cacheDir, "plan", configPath)
 
 		require.NoError(t, result.err)
 		assert.Empty(t, result.stderr)
 		assert.NoDirExists(t, cacheDir)
+		assert.Equal(t, []incusos.ImageQuery{
+			{
+				Channel:      incusos.ChannelTesting,
+				Architecture: core.Architecture("amd64"),
+				Type:         incusos.ImageTypeRaw,
+			},
+			{
+				Channel:      incusos.ChannelTesting,
+				Architecture: core.Architecture("amd64"),
+				Type:         incusos.ImageTypeRaw,
+			},
+		}, catalog.queries)
 		var plan core.ResolvedPlan
 		require.NoError(t, json.Unmarshal([]byte(result.stdout), &plan))
+		source := &core.ResolvedArtifactSource{
+			Version: "202604261712",
+			URL:     "https://example.invalid/os/202604261712/x86_64/IncusOS_202604261712.img.gz",
+			Digest:  "sha256:source-sha",
+			Size:    42,
+		}
 		assert.Equal(t, core.ResolvedPlan{
 			Image: core.Image{
 				Name:        core.Name("test-image"),
@@ -204,6 +234,7 @@ incusos: {
 					Path:         filepath.Join(outputDir, "test-image-default-amd64.raw.gz"),
 					Labels:       map[string]string{"tier": "smoke"},
 					Annotations:  map[string]string{"note": "planned"},
+					Source:       source,
 				},
 				"secureboot": {
 					ArtifactKey:  core.ArtifactKey("secureboot"),
@@ -215,6 +246,7 @@ incusos: {
 					Format:       core.ArtifactFormat("raw.gz"),
 					MediaType:    "application/gzip",
 					Path:         filepath.Join(outputDir, "custom", "secureboot.img.gz"),
+					Source:       source,
 				},
 			},
 		}, plan)
@@ -233,11 +265,42 @@ incusos: variants: default: artifact: {
 }
 `)
 
-		result := executeCommand(t, Options{}, "plan", configPath)
+		result := executeCommand(t, Options{
+			IncusOSCatalog: &testCatalog{asset: incusos.ImageAsset{
+				Version:      incusos.Version("202604261712"),
+				Architecture: core.Architecture("amd64"),
+				Type:         incusos.ImageTypeRaw,
+				URL:          "https://example.invalid/incusos.img.gz",
+				SHA256:       "source-sha",
+				Size:         42,
+			}},
+		}, "plan", configPath)
 
 		require.NoError(t, result.err)
 		assert.Empty(t, result.stderr)
 		assert.NotEmpty(t, result.stdout)
+	})
+
+	t.Run("catalog errors fail without stdout", func(t *testing.T) {
+		clearIMGCLIEnv(t)
+		catalogErr := errors.New("catalog failed")
+		configPath := writeImageConfig(t, `
+apiVersion: "imgcli.meigma.io/v0alpha1"
+kind:       "ImagePlan"
+image: name: "test-image"
+incusos: variants: default: artifact: {
+	architecture: "amd64"
+	format:       "raw.gz"
+}
+`)
+
+		result := executeCommand(t, Options{
+			IncusOSCatalog: &testCatalog{err: catalogErr},
+		}, "plan", configPath)
+
+		require.ErrorIs(t, result.err, catalogErr)
+		assert.Empty(t, result.stdout)
+		assert.Empty(t, result.stderr)
 	})
 
 	t.Run("missing provider fails explicitly", func(t *testing.T) {
@@ -380,6 +443,7 @@ talos: {}
 			Path:         run.defaultPath,
 			Labels:       map[string]string{"tier": "smoke"},
 			Annotations:  map[string]string{"note": "built"},
+			Source:       testResolvedSource(),
 			Digest:       "sha256:" + run.sha256,
 			Size:         int64(len(run.artifactBody)),
 		})
@@ -393,6 +457,7 @@ talos: {}
 			Format:       core.ArtifactFormat("raw.gz"),
 			MediaType:    "application/gzip",
 			Path:         run.secureBootPath,
+			Source:       testResolvedSource(),
 			Digest:       "sha256:" + run.sha256,
 			Size:         int64(len(run.artifactBody)),
 		})
@@ -561,9 +626,12 @@ incusos: {
 		wantOutputPath := filepath.Join(outputDir, "test-image-default-amd64.raw.gz")
 		catalog := &testCatalog{
 			asset: incusos.ImageAsset{
-				URL:    "https://example.invalid/os/202604261712/x86_64/IncusOS_202604261712.img.gz",
-				SHA256: "source-sha",
-				Size:   42,
+				Version:      incusos.Version("202604261712"),
+				Architecture: core.Architecture("amd64"),
+				Type:         incusos.ImageTypeRaw,
+				URL:          "https://example.invalid/os/202604261712/x86_64/IncusOS_202604261712.img.gz",
+				SHA256:       "source-sha",
+				Size:         42,
 			},
 		}
 		downloader := &testDownloader{
@@ -843,9 +911,12 @@ incusos: {
 	secureBootPath := filepath.Join(outputDir, "test-image-secureboot-amd64.raw.gz")
 	catalog := &testCatalog{
 		asset: incusos.ImageAsset{
-			URL:    "https://example.invalid/os/202604261712/x86_64/IncusOS_202604261712.img.gz",
-			SHA256: "source-sha",
-			Size:   42,
+			Version:      incusos.Version("202604261712"),
+			Architecture: core.Architecture("amd64"),
+			Type:         incusos.ImageTypeRaw,
+			URL:          "https://example.invalid/os/202604261712/x86_64/IncusOS_202604261712.img.gz",
+			SHA256:       "source-sha",
+			Size:         42,
 		},
 	}
 	downloader := &testDownloader{
@@ -905,6 +976,15 @@ func assertBuildMetadata(t *testing.T, path string, want core.ResolvedArtifact) 
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(artifactMetadataFileMode), info.Mode().Perm())
+}
+
+func testResolvedSource() *core.ResolvedArtifactSource {
+	return &core.ResolvedArtifactSource{
+		Version: "202604261712",
+		URL:     "https://example.invalid/os/202604261712/x86_64/IncusOS_202604261712.img.gz",
+		Digest:  "sha256:source-sha",
+		Size:    42,
+	}
 }
 
 func assertSuccessfulBuildAdapters(t *testing.T, run buildCommandRun) {
@@ -989,11 +1069,16 @@ func writeImageConfig(t *testing.T, content string) string {
 
 type testCatalog struct {
 	asset   incusos.ImageAsset
+	err     error
 	queries []incusos.ImageQuery
 }
 
 func (c *testCatalog) ResolveImage(_ context.Context, query incusos.ImageQuery) (incusos.ImageAsset, error) {
 	c.queries = append(c.queries, query)
+	if c.err != nil {
+		return incusos.ImageAsset{}, c.err
+	}
+
 	return c.asset, nil
 }
 

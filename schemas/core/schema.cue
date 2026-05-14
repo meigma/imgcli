@@ -68,9 +68,18 @@ package core
 	labels?: [string]:      string
 	annotations?: [string]: string
 
+	source?: #ResolvedArtifactSource @go(,optional=nillable)
+
 	// Populated after build.
 	digest?: string
 	size?:   int
+}
+
+#ResolvedArtifactSource: {
+	version: string
+	url:     string @go(URL)
+	digest:  string
+	size:    int
 }
 
 #ResolvedPlan: {
