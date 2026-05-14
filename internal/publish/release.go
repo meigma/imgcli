@@ -14,6 +14,7 @@ import (
 const (
 	defaultPublisherTimeout      = time.Minute
 	defaultPublisherPollInterval = time.Second
+	catalogCleanupTimeout        = 30 * time.Second
 )
 
 // CatalogClient is the imgsrv catalog operation seam used by the release publisher.
@@ -21,6 +22,7 @@ type CatalogClient interface {
 	CreateImage(context.Context, imgsrv.CreateImageRequest) (imgsrv.Image, error)
 	CreateDraftVersion(context.Context, string, imgsrv.CreateDraftVersionRequest) (imgsrv.ImageVersion, error)
 	AddArtifact(context.Context, string, string, imgsrv.AddArtifactRequest) (imgsrv.Artifact, error)
+	DeleteArtifact(context.Context, string, string, string) error
 	PublishVersion(context.Context, string, string) (imgsrv.PublishJob, error)
 	GetPublishJob(context.Context, string) (imgsrv.PublishJob, error)
 	PutAlias(context.Context, string, string, imgsrv.PutAliasRequest) (imgsrv.Alias, error)
@@ -174,7 +176,7 @@ func (p *Publisher) PublishRelease(ctx context.Context, request ReleaseRequest) 
 	for _, artifact := range uploaded {
 		published, addErr := p.addArtifact(ctx, request, artifact)
 		if addErr != nil {
-			return ReleaseResult{}, addErr
+			return ReleaseResult{}, p.cleanupDraftArtifacts(ctx, request, result.Artifacts, addErr)
 		}
 		result.Artifacts = append(result.Artifacts, published)
 	}
@@ -284,6 +286,47 @@ func (p *Publisher) addArtifact(
 		Size:             added.PrimaryBlobSizeBytes,
 		MediaType:        added.PrimaryMediaType,
 	}, nil
+}
+
+func (p *Publisher) cleanupDraftArtifacts(
+	ctx context.Context,
+	request ReleaseRequest,
+	artifacts []PublishedReleaseArtifact,
+	cause error,
+) error {
+	if len(artifacts) == 0 {
+		return cause
+	}
+
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), catalogCleanupTimeout)
+	defer cancel()
+
+	errs := []error{cause}
+	for index := len(artifacts) - 1; index >= 0; index-- {
+		artifact := artifacts[index]
+		if artifact.ServerArtifactID == "" {
+			continue
+		}
+		if err := p.catalog.DeleteArtifact(
+			cleanupCtx,
+			request.ImageName,
+			request.Version,
+			artifact.ServerArtifactID,
+		); err != nil {
+			errs = append(errs, fmt.Errorf(
+				"delete draft imgsrv artifact %s from %s %s: %w",
+				artifact.ServerArtifactID,
+				request.ImageName,
+				request.Version,
+				err,
+			))
+		}
+	}
+
+	if len(errs) == 1 {
+		return cause
+	}
+	return errors.Join(errs...)
 }
 
 func (p *Publisher) waitPublished(ctx context.Context, job imgsrv.PublishJob) (imgsrv.PublishJob, error) {

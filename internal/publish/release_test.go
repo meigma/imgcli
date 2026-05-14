@@ -328,6 +328,258 @@ func TestPublisherFailsBeforeCatalogWhenUploadIsNotReady(t *testing.T) {
 	assert.Empty(t, result)
 }
 
+func TestPublisherDeletesAddedArtifactsWhenLaterAddArtifactFails(t *testing.T) {
+	uploads := mocks.NewMockUploadsClient(t)
+	catalog := mocks.NewMockCatalogClient(t)
+	defaultBody := bytes.Repeat([]byte("a"), int(publish.MinPartSizeBytes))
+	secureBootBody := bytes.Repeat([]byte("b"), int(publish.MinPartSizeBytes))
+	defaultPath := writePublishTestArtifact(t, "default.raw.gz", defaultBody)
+	secureBootPath := writePublishTestArtifact(t, "secureboot.raw.gz", secureBootBody)
+	secureBootArtifact := releaseTestArtifact(secureBootPath, int64(len(secureBootBody)))
+	secureBootArtifact.Key = "secureboot"
+	secureBootArtifact.Variant = "secureboot"
+	secureBootArtifact.Digest = "def456"
+	addErr := errors.New("artifact rejected")
+
+	expectReadyUpload(t, uploads, defaultPath, int64(len(defaultBody)), "abc123")
+	expectReadyUpload(t, uploads, secureBootPath, int64(len(secureBootBody)), "def456")
+	catalog.EXPECT().
+		CreateImage(mock.Anything, imgsrv.CreateImageRequest{Name: "incusos"}).
+		Return(imgsrv.Image{Name: "incusos"}, nil).
+		Once()
+	catalog.EXPECT().
+		CreateDraftVersion(mock.Anything, "incusos", imgsrv.CreateDraftVersionRequest{Version: "v1.0.0"}).
+		Return(imgsrv.ImageVersion{Version: "v1.0.0", State: imgsrv.ImageVersionStateDraft}, nil).
+		Once()
+	catalog.EXPECT().
+		AddArtifact(mock.Anything, "incusos", "v1.0.0", mock.Anything).
+		Return(imgsrv.Artifact{
+			ID:                   "artifact-1",
+			Variant:              "default",
+			OperatingSystem:      "incusos",
+			Architecture:         "x86_64",
+			Format:               imgsrv.ArtifactFormatRawGZ,
+			PrimaryBlobDigest:    "sha256:abc123",
+			PrimaryBlobSizeBytes: int64(len(defaultBody)),
+			PrimaryMediaType:     "application/gzip",
+		}, nil).
+		Once()
+	catalog.EXPECT().
+		AddArtifact(mock.Anything, "incusos", "v1.0.0", mock.Anything).
+		Return(imgsrv.Artifact{}, addErr).
+		Once()
+	catalog.EXPECT().
+		DeleteArtifact(mock.Anything, "incusos", "v1.0.0", "artifact-1").
+		Return(nil).
+		Once()
+
+	publisher := newReleaseTestPublisher(t, catalog, uploads)
+	result, err := publisher.PublishRelease(context.Background(), publish.ReleaseRequest{
+		ImageName: "incusos",
+		Version:   "v1.0.0",
+		Artifacts: []publish.ReleaseArtifact{
+			releaseTestArtifact(defaultPath, int64(len(defaultBody))),
+			secureBootArtifact,
+		},
+	})
+
+	require.ErrorIs(t, err, addErr)
+	assert.Empty(t, result)
+}
+
+func TestPublisherDoesNotDeleteAddedArtifactsWhenPublishVersionFails(t *testing.T) {
+	uploads := mocks.NewMockUploadsClient(t)
+	catalog := mocks.NewMockCatalogClient(t)
+	defaultBody := bytes.Repeat([]byte("a"), int(publish.MinPartSizeBytes))
+	secureBootBody := bytes.Repeat([]byte("b"), int(publish.MinPartSizeBytes))
+	defaultPath := writePublishTestArtifact(t, "default.raw.gz", defaultBody)
+	secureBootPath := writePublishTestArtifact(t, "secureboot.raw.gz", secureBootBody)
+	secureBootArtifact := releaseTestArtifact(secureBootPath, int64(len(secureBootBody)))
+	secureBootArtifact.Key = "secureboot"
+	secureBootArtifact.Variant = "secureboot"
+	secureBootArtifact.Digest = "def456"
+	publishErr := errors.New("publish denied")
+
+	expectReadyUpload(t, uploads, defaultPath, int64(len(defaultBody)), "abc123")
+	expectReadyUpload(t, uploads, secureBootPath, int64(len(secureBootBody)), "def456")
+	catalog.EXPECT().
+		CreateImage(mock.Anything, imgsrv.CreateImageRequest{Name: "incusos"}).
+		Return(imgsrv.Image{Name: "incusos"}, nil).
+		Once()
+	catalog.EXPECT().
+		CreateDraftVersion(mock.Anything, "incusos", imgsrv.CreateDraftVersionRequest{Version: "v1.0.0"}).
+		Return(imgsrv.ImageVersion{Version: "v1.0.0", State: imgsrv.ImageVersionStateDraft}, nil).
+		Once()
+	catalog.EXPECT().
+		AddArtifact(mock.Anything, "incusos", "v1.0.0", mock.Anything).
+		Return(imgsrv.Artifact{
+			ID:                   "artifact-1",
+			Variant:              "default",
+			OperatingSystem:      "incusos",
+			Architecture:         "x86_64",
+			Format:               imgsrv.ArtifactFormatRawGZ,
+			PrimaryBlobDigest:    "sha256:abc123",
+			PrimaryBlobSizeBytes: int64(len(defaultBody)),
+			PrimaryMediaType:     "application/gzip",
+		}, nil).
+		Once()
+	catalog.EXPECT().
+		AddArtifact(mock.Anything, "incusos", "v1.0.0", mock.Anything).
+		Return(imgsrv.Artifact{
+			ID:                   "artifact-2",
+			Variant:              "secureboot",
+			OperatingSystem:      "incusos",
+			Architecture:         "x86_64",
+			Format:               imgsrv.ArtifactFormatRawGZ,
+			PrimaryBlobDigest:    "sha256:def456",
+			PrimaryBlobSizeBytes: int64(len(secureBootBody)),
+			PrimaryMediaType:     "application/gzip",
+		}, nil).
+		Once()
+	catalog.EXPECT().
+		PublishVersion(mock.Anything, "incusos", "v1.0.0").
+		Return(imgsrv.PublishJob{}, publishErr).
+		Once()
+
+	publisher := newReleaseTestPublisher(t, catalog, uploads)
+	result, err := publisher.PublishRelease(context.Background(), publish.ReleaseRequest{
+		ImageName: "incusos",
+		Version:   "v1.0.0",
+		Artifacts: []publish.ReleaseArtifact{
+			releaseTestArtifact(defaultPath, int64(len(defaultBody))),
+			secureBootArtifact,
+		},
+	})
+
+	require.ErrorIs(t, err, publishErr)
+	require.ErrorContains(t, err, "publish imgsrv version incusos v1.0.0")
+	assert.Empty(t, result)
+}
+
+func TestPublisherJoinsDraftArtifactCleanupFailure(t *testing.T) {
+	uploads := mocks.NewMockUploadsClient(t)
+	catalog := mocks.NewMockCatalogClient(t)
+	defaultBody := bytes.Repeat([]byte("a"), int(publish.MinPartSizeBytes))
+	secureBootBody := bytes.Repeat([]byte("b"), int(publish.MinPartSizeBytes))
+	defaultPath := writePublishTestArtifact(t, "default.raw.gz", defaultBody)
+	secureBootPath := writePublishTestArtifact(t, "secureboot.raw.gz", secureBootBody)
+	secureBootArtifact := releaseTestArtifact(secureBootPath, int64(len(secureBootBody)))
+	secureBootArtifact.Key = "secureboot"
+	secureBootArtifact.Variant = "secureboot"
+	secureBootArtifact.Digest = "def456"
+	addErr := errors.New("artifact rejected")
+	cleanupErr := errors.New("cleanup denied")
+
+	expectReadyUpload(t, uploads, defaultPath, int64(len(defaultBody)), "abc123")
+	expectReadyUpload(t, uploads, secureBootPath, int64(len(secureBootBody)), "def456")
+	catalog.EXPECT().
+		CreateImage(mock.Anything, imgsrv.CreateImageRequest{Name: "incusos"}).
+		Return(imgsrv.Image{Name: "incusos"}, nil).
+		Once()
+	catalog.EXPECT().
+		CreateDraftVersion(mock.Anything, "incusos", imgsrv.CreateDraftVersionRequest{Version: "v1.0.0"}).
+		Return(imgsrv.ImageVersion{Version: "v1.0.0", State: imgsrv.ImageVersionStateDraft}, nil).
+		Once()
+	catalog.EXPECT().
+		AddArtifact(mock.Anything, "incusos", "v1.0.0", mock.Anything).
+		Return(imgsrv.Artifact{
+			ID:                   "artifact-1",
+			Variant:              "default",
+			OperatingSystem:      "incusos",
+			Architecture:         "x86_64",
+			Format:               imgsrv.ArtifactFormatRawGZ,
+			PrimaryBlobDigest:    "sha256:abc123",
+			PrimaryBlobSizeBytes: int64(len(defaultBody)),
+			PrimaryMediaType:     "application/gzip",
+		}, nil).
+		Once()
+	catalog.EXPECT().
+		AddArtifact(mock.Anything, "incusos", "v1.0.0", mock.Anything).
+		Return(imgsrv.Artifact{}, addErr).
+		Once()
+	catalog.EXPECT().
+		DeleteArtifact(mock.Anything, "incusos", "v1.0.0", "artifact-1").
+		Return(cleanupErr).
+		Once()
+
+	publisher := newReleaseTestPublisher(t, catalog, uploads)
+	result, err := publisher.PublishRelease(context.Background(), publish.ReleaseRequest{
+		ImageName: "incusos",
+		Version:   "v1.0.0",
+		Artifacts: []publish.ReleaseArtifact{
+			releaseTestArtifact(defaultPath, int64(len(defaultBody))),
+			secureBootArtifact,
+		},
+	})
+
+	require.ErrorIs(t, err, addErr)
+	require.ErrorIs(t, err, cleanupErr)
+	require.ErrorContains(t, err, "delete draft imgsrv artifact artifact-1")
+	assert.Empty(t, result)
+}
+
+func TestPublisherDoesNotDeleteArtifactsWhenPublishJobFails(t *testing.T) {
+	uploads := mocks.NewMockUploadsClient(t)
+	catalog := mocks.NewMockCatalogClient(t)
+	artifactBody := bytes.Repeat([]byte("a"), int(publish.MinPartSizeBytes))
+	artifactPath := writePublishTestArtifact(t, "artifact.raw.gz", artifactBody)
+	failureMessage := "manifest generation failed"
+
+	expectReadyUpload(t, uploads, artifactPath, int64(len(artifactBody)), "abc123")
+	catalog.EXPECT().
+		CreateImage(mock.Anything, imgsrv.CreateImageRequest{Name: "incusos"}).
+		Return(imgsrv.Image{Name: "incusos"}, nil).
+		Once()
+	catalog.EXPECT().
+		CreateDraftVersion(mock.Anything, "incusos", imgsrv.CreateDraftVersionRequest{Version: "v1.0.0"}).
+		Return(imgsrv.ImageVersion{Version: "v1.0.0", State: imgsrv.ImageVersionStateDraft}, nil).
+		Once()
+	catalog.EXPECT().
+		AddArtifact(mock.Anything, "incusos", "v1.0.0", mock.Anything).
+		Return(imgsrv.Artifact{
+			ID:                   "artifact-1",
+			Variant:              "default",
+			OperatingSystem:      "incusos",
+			Architecture:         "x86_64",
+			Format:               imgsrv.ArtifactFormatRawGZ,
+			PrimaryBlobDigest:    "sha256:abc123",
+			PrimaryBlobSizeBytes: int64(len(artifactBody)),
+			PrimaryMediaType:     "application/gzip",
+		}, nil).
+		Once()
+	catalog.EXPECT().
+		PublishVersion(mock.Anything, "incusos", "v1.0.0").
+		Return(imgsrv.PublishJob{
+			ID:        "publish-job-1",
+			ImageName: "incusos",
+			Version:   "v1.0.0",
+			State:     imgsrv.PublishJobStateQueued,
+		}, nil).
+		Once()
+	catalog.EXPECT().
+		GetPublishJob(mock.Anything, "publish-job-1").
+		Return(imgsrv.PublishJob{
+			ID:             "publish-job-1",
+			ImageName:      "incusos",
+			Version:        "v1.0.0",
+			State:          imgsrv.PublishJobStateFailed,
+			FailureMessage: &failureMessage,
+		}, nil).
+		Once()
+
+	publisher := newReleaseTestPublisher(t, catalog, uploads)
+	result, err := publisher.PublishRelease(context.Background(), publish.ReleaseRequest{
+		ImageName: "incusos",
+		Version:   "v1.0.0",
+		Artifacts: []publish.ReleaseArtifact{
+			releaseTestArtifact(artifactPath, int64(len(artifactBody))),
+		},
+	})
+
+	require.ErrorContains(t, err, "publish imgsrv job publish-job-1 failed: manifest generation failed")
+	assert.Empty(t, result)
+}
+
 func TestPublisherSurfacesPartialAliasFailure(t *testing.T) {
 	uploads := mocks.NewMockUploadsClient(t)
 	catalog := mocks.NewMockCatalogClient(t)

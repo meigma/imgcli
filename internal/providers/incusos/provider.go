@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -82,6 +83,9 @@ func (p *Provider) Build(ctx context.Context, req providers.BuildRequest) (provi
 	if err != nil {
 		return providers.BuildResult{}, err
 	}
+	if outputErr := rejectExistingOutputPaths(artifacts); outputErr != nil {
+		return providers.BuildResult{}, outputErr
+	}
 
 	seed, err := p.options.SeedBuilder.BuildSeed(ctx, p.config)
 	if err != nil {
@@ -89,6 +93,7 @@ func (p *Provider) Build(ctx context.Context, req providers.BuildRequest) (provi
 	}
 
 	builtArtifacts := make([]providers.BuiltArtifact, 0, len(artifacts))
+	cleanupOutputs := make([]string, 0, len(artifacts))
 	for _, artifact := range artifacts {
 		source := resolveSource(p.config.Defaults, artifact.variant.Source)
 		asset, err := p.options.Catalog.ResolveImage(ctx, ImageQuery{
@@ -98,18 +103,19 @@ func (p *Provider) Build(ctx context.Context, req providers.BuildRequest) (provi
 			Type:         artifact.imageType,
 		})
 		if err != nil {
-			return providers.BuildResult{}, err
+			return providers.BuildResult{}, cleanupBuiltOutputs(err, cleanupOutputs)
 		}
 
 		downloaded, err := p.options.Downloader.DownloadImage(ctx, asset)
 		if err != nil {
-			return providers.BuildResult{}, err
+			return providers.BuildResult{}, cleanupBuiltOutputs(err, cleanupOutputs)
 		}
 
 		customized, err := p.options.ImageInjector.InjectSeed(ctx, downloaded, seed, artifact.plan.OutputPath)
 		if err != nil {
-			return providers.BuildResult{}, err
+			return providers.BuildResult{}, cleanupBuiltOutputs(err, cleanupOutputs)
 		}
+		cleanupOutputs = append(cleanupOutputs, artifact.plan.OutputPath)
 
 		builtArtifacts = append(builtArtifacts, providers.BuiltArtifact{
 			Plan:   artifact.plan,
@@ -192,6 +198,42 @@ func planArtifacts(req providers.BuildRequest, config Config) ([]plannedArtifact
 	}
 
 	return artifacts, nil
+}
+
+func rejectExistingOutputPaths(artifacts []plannedArtifact) error {
+	for _, artifact := range artifacts {
+		path := artifact.plan.OutputPath
+		_, err := os.Stat(path)
+		switch {
+		case err == nil:
+			return fmt.Errorf("incusos artifact output path already exists: %q", path)
+		case errors.Is(err, os.ErrNotExist):
+			continue
+		default:
+			return fmt.Errorf("stat incusos artifact output path %q: %w", path, err)
+		}
+	}
+
+	return nil
+}
+
+func cleanupBuiltOutputs(cause error, paths []string) error {
+	if len(paths) == 0 {
+		return cause
+	}
+
+	errs := []error{cause}
+	for index := len(paths) - 1; index >= 0; index-- {
+		path := paths[index]
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("remove partial incusos artifact %q: %w", path, err))
+		}
+	}
+
+	if len(errs) == 1 {
+		return cause
+	}
+	return errors.Join(errs...)
 }
 
 func artifactOutputPath(
