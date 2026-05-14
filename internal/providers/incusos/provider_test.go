@@ -3,6 +3,7 @@ package incusos
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -327,6 +328,72 @@ func TestProviderBuildRejectsDuplicateOutputPathsBeforeBuild(t *testing.T) {
 	assert.Empty(t, injector.calls)
 }
 
+func TestProviderBuildCleansUpNewOutputsAfterLaterVariantFailure(t *testing.T) {
+	outputDir := t.TempDir()
+	injectErr := errors.New("inject failed")
+	injector := &writingImageInjector{failOnCall: 2, err: injectErr}
+	provider := New(multiVariantConfig(), Options{
+		Catalog:       &recordingCatalog{asset: ImageAsset{}},
+		Downloader:    &recordingDownloader{},
+		SeedBuilder:   &recordingSeedBuilder{seed: SeedArchive{Data: []byte("seed")}},
+		ImageInjector: injector,
+	})
+
+	result, err := provider.Build(context.Background(), providers.BuildRequest{
+		Plan:      providers.Plan{Image: core.Image{Name: core.Name("test-image")}},
+		OutputDir: outputDir,
+	})
+
+	require.ErrorIs(t, err, injectErr)
+	assert.Empty(t, result)
+	assert.NoFileExists(t, filepath.Join(outputDir, "test-image-default-amd64.raw.gz"))
+	assert.NoFileExists(t, filepath.Join(outputDir, "test-image-secureboot-amd64.raw.gz"))
+	require.Len(t, injector.calls, 2)
+}
+
+func TestProviderBuildRejectsPreExistingOutputBeforeBuild(t *testing.T) {
+	outputDir := t.TempDir()
+	defaultOutputPath := filepath.Join(outputDir, "test-image-default-amd64.raw.gz")
+	require.NoError(t, os.WriteFile(defaultOutputPath, []byte("pre-existing"), 0o600))
+	catalog := &recordingCatalog{asset: ImageAsset{}}
+	downloader := &recordingDownloader{}
+	seedBuilder := &recordingSeedBuilder{seed: SeedArchive{Data: []byte("seed")}}
+	injector := &writingImageInjector{}
+	provider := New(multiVariantConfig(), Options{
+		Catalog:       catalog,
+		Downloader:    downloader,
+		SeedBuilder:   seedBuilder,
+		ImageInjector: injector,
+	})
+
+	result, err := provider.Build(context.Background(), providers.BuildRequest{
+		Plan:      providers.Plan{Image: core.Image{Name: core.Name("test-image")}},
+		OutputDir: outputDir,
+	})
+
+	require.ErrorContains(t, err, "incusos artifact output path already exists")
+	assert.Empty(t, result)
+	assert.FileExists(t, defaultOutputPath)
+	assert.Empty(t, catalog.queries)
+	assert.Empty(t, downloader.assets)
+	assert.Empty(t, seedBuilder.configs)
+	assert.Empty(t, injector.calls)
+	assert.NoFileExists(t, filepath.Join(outputDir, "test-image-secureboot-amd64.raw.gz"))
+}
+
+func TestCleanupBuiltOutputsJoinsCleanupErrors(t *testing.T) {
+	cause := errors.New("build failed")
+	outputPath := filepath.Join(t.TempDir(), "artifact.raw.gz")
+	require.NoError(t, os.Mkdir(outputPath, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(outputPath, "child"), []byte("data"), 0o600))
+
+	err := cleanupBuiltOutputs(cause, []string{outputPath})
+
+	require.ErrorIs(t, err, cause)
+	require.ErrorContains(t, err, "remove partial incusos artifact")
+	assert.DirExists(t, outputPath)
+}
+
 func TestProviderBuildErrors(t *testing.T) {
 	catalogErr := errors.New("catalog failed")
 	downloadErr := errors.New("download failed")
@@ -451,6 +518,26 @@ func TestProviderBuildErrors(t *testing.T) {
 	}
 }
 
+func multiVariantConfig() Config {
+	return Config{
+		Seed: &incusosschema.Seed{},
+		Variants: map[core.VariantName]incusosschema.Variant{
+			"default": {
+				Artifact: core.ArtifactIntent{
+					Architecture: core.Architecture("amd64"),
+					Format:       core.ArtifactFormat("raw.gz"),
+				},
+			},
+			"secureboot": {
+				Artifact: core.ArtifactIntent{
+					Architecture: core.Architecture("amd64"),
+					Format:       core.ArtifactFormat("raw.gz"),
+				},
+			},
+		},
+	}
+}
+
 func configWithVariant(format core.ArtifactFormat) Config {
 	return configWithArtifact(core.ArtifactIntent{
 		Architecture: core.Architecture("amd64"),
@@ -556,4 +643,35 @@ func (i *recordingImageInjector) InjectSeed(
 		customized.Path = outputPath
 	}
 	return customized, nil
+}
+
+type writingImageInjector struct {
+	failOnCall int
+	err        error
+	calls      []injectCall
+}
+
+func (i *writingImageInjector) InjectSeed(
+	_ context.Context,
+	image DownloadedImage,
+	seed SeedArchive,
+	outputPath string,
+) (CustomizedImage, error) {
+	i.calls = append(i.calls, injectCall{image: image, seed: seed, outputPath: outputPath})
+	if i.failOnCall == len(i.calls) {
+		return CustomizedImage{}, i.err
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return CustomizedImage{}, err
+	}
+	if err := os.WriteFile(outputPath, []byte(outputPath), 0o600); err != nil {
+		return CustomizedImage{}, err
+	}
+
+	return CustomizedImage{
+		Source: image,
+		Path:   outputPath,
+		Size:   int64(len(outputPath)),
+		SHA256: "custom-sha",
+	}, nil
 }
