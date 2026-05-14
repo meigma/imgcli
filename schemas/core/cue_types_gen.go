@@ -83,10 +83,22 @@ type ResolvedArtifact struct {
 
 	Annotations map[string]string `json:"annotations,omitempty"`
 
+	Source *ResolvedArtifactSource `json:"source,omitempty"`
+
 	// Populated after build.
 	Digest string `json:"digest,omitempty"`
 
 	Size int64 `json:"size,omitempty"`
+}
+
+type ResolvedArtifactSource struct {
+	Version string `json:"version"`
+
+	URL string `json:"url"`
+
+	Digest string `json:"digest"`
+
+	Size int64 `json:"size"`
 }
 
 type ResolvedPlan struct {

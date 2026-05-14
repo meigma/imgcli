@@ -60,9 +60,15 @@ func (p *Provider) Name() core.ProviderName {
 }
 
 // Plan resolves IncusOS configuration into concrete artifact work.
-func (p *Provider) Plan(_ context.Context, req providers.PlanRequest) (providers.Plan, error) {
+func (p *Provider) Plan(ctx context.Context, req providers.PlanRequest) (providers.Plan, error) {
 	artifacts, err := planArtifacts(req, p.config)
 	if err != nil {
+		return providers.Plan{}, err
+	}
+	if p.options.Catalog == nil {
+		return providers.Plan{}, errors.New("incusos catalog is required")
+	}
+	if err := p.resolveArtifactSources(ctx, artifacts); err != nil {
 		return providers.Plan{}, err
 	}
 
@@ -105,18 +111,7 @@ func (p *Provider) Build(ctx context.Context, req providers.BuildRequest) (provi
 	builtArtifacts := make([]providers.BuiltArtifact, 0, len(artifacts))
 	cleanupOutputs := make([]string, 0, len(artifacts))
 	for _, artifact := range artifacts {
-		source := resolveSource(p.config.Defaults, artifact.variant.Source)
-		asset, err := p.options.Catalog.ResolveImage(ctx, ImageQuery{
-			Channel:      source.Channel,
-			Version:      source.Version,
-			Architecture: artifact.plan.Architecture,
-			Type:         artifact.imageType,
-		})
-		if err != nil {
-			return providers.BuildResult{}, cleanupBuiltOutputs(err, cleanupOutputs)
-		}
-
-		downloaded, err := p.options.Downloader.DownloadImage(ctx, asset)
+		downloaded, err := p.options.Downloader.DownloadImage(ctx, artifact.source)
 		if err != nil {
 			return providers.BuildResult{}, cleanupBuiltOutputs(err, cleanupOutputs)
 		}
@@ -144,7 +139,29 @@ func (p *Provider) Build(ctx context.Context, req providers.BuildRequest) (provi
 type plannedArtifact struct {
 	variant   incusosschema.Variant
 	imageType ImageType
+	source    ImageAsset
 	plan      providers.ArtifactPlan
+}
+
+func (p *Provider) resolveArtifactSources(ctx context.Context, artifacts []plannedArtifact) error {
+	for index := range artifacts {
+		artifact := &artifacts[index]
+		source := resolveSource(p.config.Defaults, artifact.variant.Source)
+		asset, err := p.options.Catalog.ResolveImage(ctx, ImageQuery{
+			Channel:      source.Channel,
+			Version:      source.Version,
+			Architecture: artifact.plan.Architecture,
+			Type:         artifact.imageType,
+		})
+		if err != nil {
+			return err
+		}
+
+		artifact.source = asset
+		artifact.plan.Source = sourceMetadataForAsset(asset)
+	}
+
+	return nil
 }
 
 func planArtifacts(req providers.PlanRequest, config Config) ([]plannedArtifact, error) {
@@ -237,15 +254,44 @@ func plannedArtifactsForExecution(plan providers.Plan, config Config) ([]planned
 		if err != nil {
 			return nil, err
 		}
+		sourceAsset, err := sourceAssetFromPlan(artifactPlan, imageType)
+		if err != nil {
+			return nil, err
+		}
 
 		artifacts = append(artifacts, plannedArtifact{
 			variant:   variant,
 			imageType: imageType,
+			source:    sourceAsset,
 			plan:      artifactPlan,
 		})
 	}
 
 	return artifacts, nil
+}
+
+func sourceMetadataForAsset(asset ImageAsset) *providers.SourceMetadata {
+	return &providers.SourceMetadata{
+		Version: string(asset.Version),
+		URL:     asset.URL,
+		SHA256:  asset.SHA256,
+		Size:    asset.Size,
+	}
+}
+
+func sourceAssetFromPlan(artifact providers.ArtifactPlan, imageType ImageType) (ImageAsset, error) {
+	if artifact.Source == nil {
+		return ImageAsset{}, fmt.Errorf("incusos planned artifact %q is missing source metadata", artifact.Key)
+	}
+
+	return ImageAsset{
+		Version:      Version(artifact.Source.Version),
+		Architecture: artifact.Architecture,
+		Type:         imageType,
+		URL:          artifact.Source.URL,
+		SHA256:       artifact.Source.SHA256,
+		Size:         artifact.Source.Size,
+	}, nil
 }
 
 func rejectExistingOutputPaths(artifacts []plannedArtifact) error {

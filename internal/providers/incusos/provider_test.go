@@ -56,7 +56,11 @@ func TestProviderPlanResolvesArtifactFilenames(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			outputDir := t.TempDir()
-			provider := New(configWithArtifact(tt.artifact), Options{})
+			asset := testImageAsset()
+			catalog := &recordingCatalog{asset: asset}
+			provider := New(configWithArtifact(tt.artifact), Options{
+				Catalog: catalog,
+			})
 
 			plan, err := provider.Plan(context.Background(), providers.PlanRequest{
 				Image:     core.Image{Name: core.Name("test-image")},
@@ -78,6 +82,7 @@ func TestProviderPlanResolvesArtifactFilenames(t *testing.T) {
 				OutputPath:      tt.wantOutputPath(outputDir),
 				Labels:          tt.artifact.Labels,
 				Annotations:     tt.artifact.Annotations,
+				Source:          sourceMetadataForAsset(asset),
 			}, plan.Artifacts[0])
 		})
 	}
@@ -85,7 +90,11 @@ func TestProviderPlanResolvesArtifactFilenames(t *testing.T) {
 
 func TestProviderPlanCreatesMultipleVariantsInStableOrder(t *testing.T) {
 	outputDir := t.TempDir()
-	provider := New(multiVariantConfig(), Options{})
+	asset := testImageAsset()
+	catalog := &recordingCatalog{asset: asset}
+	provider := New(multiVariantConfig(), Options{
+		Catalog: catalog,
+	})
 
 	plan, err := provider.Plan(context.Background(), providers.PlanRequest{
 		Image:     core.Image{Name: core.Name("test-image")},
@@ -93,6 +102,18 @@ func TestProviderPlanCreatesMultipleVariantsInStableOrder(t *testing.T) {
 	})
 
 	require.NoError(t, err)
+	assert.Equal(t, []ImageQuery{
+		{
+			Channel:      ChannelStable,
+			Architecture: core.Architecture("amd64"),
+			Type:         ImageTypeRaw,
+		},
+		{
+			Channel:      ChannelStable,
+			Architecture: core.Architecture("amd64"),
+			Type:         ImageTypeRaw,
+		},
+	}, catalog.queries)
 	assert.Equal(t, []providers.ArtifactPlan{
 		{
 			Key:             core.ArtifactKey("default"),
@@ -102,6 +123,7 @@ func TestProviderPlanCreatesMultipleVariantsInStableOrder(t *testing.T) {
 			Format:          core.ArtifactFormat("raw.gz"),
 			MediaType:       "application/gzip",
 			OutputPath:      filepath.Join(outputDir, "test-image-default-amd64.raw.gz"),
+			Source:          sourceMetadataForAsset(asset),
 		},
 		{
 			Key:             core.ArtifactKey("secureboot"),
@@ -111,6 +133,7 @@ func TestProviderPlanCreatesMultipleVariantsInStableOrder(t *testing.T) {
 			Format:          core.ArtifactFormat("raw.gz"),
 			MediaType:       "application/gzip",
 			OutputPath:      filepath.Join(outputDir, "test-image-secureboot-amd64.raw.gz"),
+			Source:          sourceMetadataForAsset(asset),
 		},
 	}, plan.Artifacts)
 }
@@ -119,6 +142,7 @@ func TestProviderPlanErrors(t *testing.T) {
 	tests := []struct {
 		name    string
 		config  Config
+		options Options
 		wantErr string
 	}{
 		{
@@ -132,6 +156,19 @@ func TestProviderPlanErrors(t *testing.T) {
 			name:    "unsupported format",
 			config:  configWithVariant(core.ArtifactFormat("iso")),
 			wantErr: `unsupported incusos artifact format "iso"`,
+		},
+		{
+			name:    "missing catalog",
+			config:  configWithVariant(core.ArtifactFormat("raw")),
+			wantErr: "incusos catalog is required",
+		},
+		{
+			name:   "catalog error",
+			config: configWithVariant(core.ArtifactFormat("raw")),
+			options: Options{
+				Catalog: &recordingCatalog{err: errors.New("catalog failed")},
+			},
+			wantErr: "catalog failed",
 		},
 		{
 			name: "duplicate output paths",
@@ -178,7 +215,11 @@ func TestProviderPlanErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			provider := New(tt.config, Options{})
+			options := tt.options
+			if options == (Options{}) && tt.wantErr != "incusos catalog is required" {
+				options.Catalog = &recordingCatalog{asset: testImageAsset()}
+			}
+			provider := New(tt.config, options)
 
 			plan, err := provider.Plan(context.Background(), providers.PlanRequest{
 				Image:     core.Image{Name: core.Name("test-image")},
@@ -320,6 +361,7 @@ func TestProviderBuildCreatesCustomizedImage(t *testing.T) {
 				OutputPath:      wantOutputPath,
 				Labels:          tt.artifact.Labels,
 				Annotations:     tt.artifact.Annotations,
+				Source:          sourceMetadataForAsset(asset),
 			}, result.Plan.Artifacts[0])
 		})
 	}
@@ -419,6 +461,7 @@ func TestProviderBuildCreatesMultipleVariantsInStableOrder(t *testing.T) {
 			Format:          core.ArtifactFormat("raw.gz"),
 			MediaType:       "application/gzip",
 			OutputPath:      filepath.Join(outputDir, "test-image-default-amd64.raw.gz"),
+			Source:          sourceMetadataForAsset(asset),
 		},
 		{
 			Key:             core.ArtifactKey("secureboot"),
@@ -428,6 +471,7 @@ func TestProviderBuildCreatesMultipleVariantsInStableOrder(t *testing.T) {
 			Format:          core.ArtifactFormat("raw.gz"),
 			MediaType:       "application/gzip",
 			OutputPath:      filepath.Join(outputDir, "test-image-secureboot-amd64.raw.gz"),
+			Source:          sourceMetadataForAsset(asset),
 		},
 	}, result.Plan.Artifacts)
 	assert.Equal(t, result.Plan.Artifacts[0], result.Artifacts[0].Plan)
@@ -537,7 +581,18 @@ func TestProviderBuildRejectsPreExistingOutputBeforeBuild(t *testing.T) {
 	require.ErrorContains(t, err, "incusos artifact output path already exists")
 	assert.Empty(t, result)
 	assert.FileExists(t, defaultOutputPath)
-	assert.Empty(t, catalog.queries)
+	assert.Equal(t, []ImageQuery{
+		{
+			Channel:      ChannelStable,
+			Architecture: core.Architecture("amd64"),
+			Type:         ImageTypeRaw,
+		},
+		{
+			Channel:      ChannelStable,
+			Architecture: core.Architecture("amd64"),
+			Type:         ImageTypeRaw,
+		},
+	}, catalog.queries)
 	assert.Empty(t, downloader.assets)
 	assert.Empty(t, seedBuilder.configs)
 	assert.Empty(t, injector.calls)
@@ -716,6 +771,17 @@ func configWithArtifact(artifact core.ArtifactIntent) Config {
 				Artifact: artifact,
 			},
 		},
+	}
+}
+
+func testImageAsset() ImageAsset {
+	return ImageAsset{
+		Version:      Version("202604261712"),
+		Architecture: core.Architecture("amd64"),
+		Type:         ImageTypeRaw,
+		URL:          "https://example.invalid/os/202604261712/x86_64/IncusOS_202604261712.img.gz",
+		SHA256:       "source-sha",
+		Size:         42,
 	}
 }
 
