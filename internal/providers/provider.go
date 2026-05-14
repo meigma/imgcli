@@ -14,7 +14,7 @@ type Provider interface {
 	// Plan resolves provider-specific configuration into concrete artifact work.
 	Plan(ctx context.Context, req PlanRequest) (Plan, error)
 
-	// Build creates artifacts from an already resolved provider plan.
+	// Build creates artifacts for the requested provider configuration.
 	Build(ctx context.Context, req BuildRequest) (BuildResult, error)
 }
 
@@ -32,7 +32,7 @@ type PlanRequest struct {
 
 // BuildRequest carries the provider plan and build-time locations.
 type BuildRequest struct {
-	// Plan is the concrete artifact work to execute.
+	// Plan carries command-level plan inputs and any previously resolved plan data.
 	Plan Plan
 
 	// CacheDir is the directory providers may use for reusable downloads or intermediates.

@@ -60,11 +60,16 @@ func (p *Provider) Name() core.ProviderName {
 }
 
 // Plan resolves IncusOS configuration into concrete artifact work.
-func (p *Provider) Plan(_ context.Context, _ providers.PlanRequest) (providers.Plan, error) {
-	return providers.Plan{}, ErrNotImplemented
+func (p *Provider) Plan(_ context.Context, req providers.PlanRequest) (providers.Plan, error) {
+	artifacts, err := planArtifacts(req, p.config)
+	if err != nil {
+		return providers.Plan{}, err
+	}
+
+	return providerPlan(req, artifacts), nil
 }
 
-// Build creates IncusOS artifacts from an already resolved plan.
+// Build creates IncusOS artifacts from a resolved provider plan.
 func (p *Provider) Build(ctx context.Context, req providers.BuildRequest) (providers.BuildResult, error) {
 	if p.options.Catalog == nil {
 		return providers.BuildResult{}, errors.New("incusos catalog is required")
@@ -79,7 +84,12 @@ func (p *Provider) Build(ctx context.Context, req providers.BuildRequest) (provi
 		return providers.BuildResult{}, errors.New("incusos image injector is required")
 	}
 
-	artifacts, err := planArtifacts(req, p.config)
+	plan, err := p.Plan(ctx, buildPlanRequest(req))
+	if err != nil {
+		return providers.BuildResult{}, err
+	}
+
+	artifacts, err := plannedArtifactsForExecution(plan, p.config)
 	if err != nil {
 		return providers.BuildResult{}, err
 	}
@@ -99,7 +109,7 @@ func (p *Provider) Build(ctx context.Context, req providers.BuildRequest) (provi
 		asset, err := p.options.Catalog.ResolveImage(ctx, ImageQuery{
 			Channel:      source.Channel,
 			Version:      source.Version,
-			Architecture: artifact.variant.Artifact.Architecture,
+			Architecture: artifact.plan.Architecture,
 			Type:         artifact.imageType,
 		})
 		if err != nil {
@@ -125,14 +135,6 @@ func (p *Provider) Build(ctx context.Context, req providers.BuildRequest) (provi
 		})
 	}
 
-	plan := req.Plan
-	plan.Provider = providerName
-	plan.OutputDir = outputDir(req)
-	plan.Artifacts = make([]providers.ArtifactPlan, 0, len(artifacts))
-	for _, artifact := range artifacts {
-		plan.Artifacts = append(plan.Artifacts, artifact.plan)
-	}
-
 	return providers.BuildResult{
 		Plan:      plan,
 		Artifacts: builtArtifacts,
@@ -145,7 +147,7 @@ type plannedArtifact struct {
 	plan      providers.ArtifactPlan
 }
 
-func planArtifacts(req providers.BuildRequest, config Config) ([]plannedArtifact, error) {
+func planArtifacts(req providers.PlanRequest, config Config) ([]plannedArtifact, error) {
 	if len(config.Variants) == 0 {
 		return nil, errors.New("incusos build requires at least one variant")
 	}
@@ -200,6 +202,52 @@ func planArtifacts(req providers.BuildRequest, config Config) ([]plannedArtifact
 	return artifacts, nil
 }
 
+func providerPlan(req providers.PlanRequest, artifacts []plannedArtifact) providers.Plan {
+	plan := providers.Plan{
+		Provider:  providerName,
+		Image:     req.Image,
+		Version:   req.Version,
+		OutputDir: outputDir(req),
+		Artifacts: make([]providers.ArtifactPlan, 0, len(artifacts)),
+	}
+	for _, artifact := range artifacts {
+		plan.Artifacts = append(plan.Artifacts, artifact.plan)
+	}
+
+	return plan
+}
+
+func buildPlanRequest(req providers.BuildRequest) providers.PlanRequest {
+	return providers.PlanRequest{
+		Image:     req.Plan.Image,
+		Version:   req.Plan.Version,
+		OutputDir: buildOutputDir(req),
+	}
+}
+
+func plannedArtifactsForExecution(plan providers.Plan, config Config) ([]plannedArtifact, error) {
+	artifacts := make([]plannedArtifact, 0, len(plan.Artifacts))
+	for _, artifactPlan := range plan.Artifacts {
+		variant, ok := config.Variants[artifactPlan.Variant]
+		if !ok {
+			return nil, fmt.Errorf("incusos planned artifact references unknown variant %q", artifactPlan.Variant)
+		}
+
+		imageType, err := imageTypeForFormat(artifactPlan.Format)
+		if err != nil {
+			return nil, err
+		}
+
+		artifacts = append(artifacts, plannedArtifact{
+			variant:   variant,
+			imageType: imageType,
+			plan:      artifactPlan,
+		})
+	}
+
+	return artifacts, nil
+}
+
 func rejectExistingOutputPaths(artifacts []plannedArtifact) error {
 	for _, artifact := range artifacts {
 		path := artifact.plan.OutputPath
@@ -237,13 +285,13 @@ func cleanupBuiltOutputs(cause error, paths []string) error {
 }
 
 func artifactOutputPath(
-	req providers.BuildRequest,
+	req providers.PlanRequest,
 	variantName core.VariantName,
 	artifact core.ArtifactIntent,
 ) (string, error) {
 	filename := strings.TrimSpace(artifact.Filename)
 	if filename == "" {
-		filename = fallbackArtifactFilename(req.Plan.Image.Name, variantName, artifact)
+		filename = fallbackArtifactFilename(req.Image.Name, variantName, artifact)
 	}
 	if filepath.IsAbs(filename) {
 		return "", fmt.Errorf("incusos artifact filename must be relative: %q", filename)
@@ -267,11 +315,20 @@ func fallbackArtifactFilename(imageName core.Name, variantName core.VariantName,
 	return fmt.Sprintf("%s-%s-%s.%s", name, variantName, artifact.Architecture, artifact.Format)
 }
 
-func outputDir(req providers.BuildRequest) string {
+func buildOutputDir(req providers.BuildRequest) string {
 	outputDir := strings.TrimSpace(req.OutputDir)
 	if outputDir == "" {
 		outputDir = strings.TrimSpace(req.Plan.OutputDir)
 	}
+	if outputDir == "" {
+		return defaultOutputDir
+	}
+
+	return outputDir
+}
+
+func outputDir(req providers.PlanRequest) string {
+	outputDir := strings.TrimSpace(req.OutputDir)
 	if outputDir == "" {
 		return defaultOutputDir
 	}
