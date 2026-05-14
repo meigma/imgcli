@@ -66,21 +66,25 @@ func resolvedPlanForOutput(plan providers.Plan) core.ResolvedPlan {
 	}
 
 	for _, artifact := range plan.Artifacts {
-		resolved.Artifacts[artifact.Key] = core.ResolvedArtifact{
-			ArtifactKey:  artifact.Key,
-			ImageName:    string(plan.Image.Name),
-			Version:      plan.Version,
-			Variant:      artifact.Variant,
-			Provider:     plan.Provider,
-			Os:           artifact.OperatingSystem,
-			Architecture: artifact.Architecture,
-			Format:       artifact.Format,
-			MediaType:    artifact.MediaType,
-			Path:         artifact.OutputPath,
-			Labels:       artifact.Labels,
-			Annotations:  artifact.Annotations,
-		}
+		resolved.Artifacts[artifact.Key] = resolvedArtifactForOutput(plan, artifact)
 	}
 
 	return resolved
+}
+
+func resolvedArtifactForOutput(plan providers.Plan, artifact providers.ArtifactPlan) core.ResolvedArtifact {
+	return core.ResolvedArtifact{
+		ArtifactKey:  artifact.Key,
+		ImageName:    string(plan.Image.Name),
+		Version:      plan.Version,
+		Variant:      artifact.Variant,
+		Provider:     plan.Provider,
+		Os:           artifact.OperatingSystem,
+		Architecture: artifact.Architecture,
+		Format:       artifact.Format,
+		MediaType:    artifact.MediaType,
+		Path:         artifact.OutputPath,
+		Labels:       artifact.Labels,
+		Annotations:  artifact.Annotations,
+	}
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/meigma/imgcli/internal/providers/incusos"
 	"github.com/meigma/imgcli/internal/publish"
 	publishmocks "github.com/meigma/imgcli/internal/publish/mocks"
+	imgschemas "github.com/meigma/imgcli/schemas"
 	"github.com/meigma/imgcli/schemas/core"
 )
 
@@ -327,69 +328,136 @@ talos: {}
 		assert.Empty(t, result.stderr)
 	})
 
-	t.Run("prints customized IncusOS artifact path", func(t *testing.T) {
-		clearIMGCLIEnv(t)
-		outputDir := filepath.Join(t.TempDir(), "out")
-		configPath := writeImageConfig(t, `
-apiVersion: "imgcli.meigma.io/v0alpha1"
-kind:       "ImagePlan"
-image: name: "test-image"
-output: dir: "`+outputDir+`"
-incusos: {
-	defaults: source: channel: "testing"
-	seed: install: {}
-	variants: default: {
-		source: version: "202604261712"
-		artifact: {
-			architecture: "amd64"
-			format:       "raw.gz"
-		}
-	}
-}
-`)
-		catalog := &testCatalog{
-			asset: incusos.ImageAsset{
-				URL:    "https://example.invalid/os/202604261712/x86_64/IncusOS_202604261712.img.gz",
-				SHA256: "source-sha",
-				Size:   42,
-			},
-		}
-		downloader := &testDownloader{
-			image: incusos.DownloadedImage{
-				Path:   "/cache/source.img.gz",
-				SHA256: "source-sha",
-				Size:   42,
-			},
-		}
-		seedBuilder := &testSeedBuilder{
-			seed: incusos.SeedArchive{Data: []byte("seed")},
-		}
-		injector := &testImageInjector{}
-		cacheDir := filepath.Join(t.TempDir(), "cache")
+	t.Run("prints table and writes artifact sidecars by default", func(t *testing.T) {
+		run := runSuccessfulBuildCommand(t)
 
-		result := executeCommand(t, Options{
-			IncusOSCatalog:       catalog,
-			IncusOSDownloader:    downloader,
-			IncusOSSeedBuilder:   seedBuilder,
-			IncusOSImageInjector: injector,
-		}, "--cache-dir", cacheDir, "build", configPath)
-
-		require.NoError(t, result.err)
-		wantOutputPath := filepath.Join(outputDir, "test-image-default-amd64.raw.gz")
-		assert.Equal(t, wantOutputPath+"\n", result.stdout)
-		assert.Empty(t, result.stderr)
-		assert.NoDirExists(t, cacheDir)
-		require.Len(t, catalog.queries, 1)
-		assert.Equal(t, incusos.ImageQuery{
-			Channel:      incusos.ChannelTesting,
-			Version:      incusos.Version("202604261712"),
+		require.NoError(t, run.result.err)
+		assert.Empty(t, run.result.stderr)
+		lines := strings.Split(strings.TrimSuffix(run.result.stdout, "\n"), "\n")
+		require.Len(t, lines, 3)
+		assert.Equal(
+			t,
+			[]string{"VARIANT", "OS", "ARCH", "FORMAT", "SIZE_BYTES", "SHA256_PREFIX", "ARTIFACT", "METADATA"},
+			strings.Fields(lines[0]),
+		)
+		assert.Equal(
+			t,
+			[]string{
+				"default",
+				"incusos",
+				"amd64",
+				"raw.gz",
+				"8",
+				run.sha256[:buildSHA256PrefixLength],
+				run.defaultPath,
+				run.defaultMetadataPath,
+			},
+			strings.Fields(lines[1]),
+		)
+		assert.Equal(
+			t,
+			[]string{
+				"secureboot",
+				"incusos",
+				"amd64",
+				"raw.gz",
+				"8",
+				run.sha256[:buildSHA256PrefixLength],
+				run.secureBootPath,
+				run.secureBootMetadataPath,
+			},
+			strings.Fields(lines[2]),
+		)
+		assertBuildMetadata(t, run.defaultMetadataPath, core.ResolvedArtifact{
+			ArtifactKey:  core.ArtifactKey("default"),
+			ImageName:    "test-image",
+			Variant:      core.VariantName("default"),
+			Provider:     core.ProviderName("incusos"),
+			Os:           "incusos",
 			Architecture: core.Architecture("amd64"),
-			Type:         incusos.ImageTypeRaw,
-		}, catalog.queries[0])
-		assert.Equal(t, []incusos.ImageAsset{catalog.asset}, downloader.assets)
-		assert.Len(t, seedBuilder.configs, 1)
-		require.Len(t, injector.calls, 1)
-		assert.Equal(t, wantOutputPath, injector.calls[0].outputPath)
+			Format:       core.ArtifactFormat("raw.gz"),
+			MediaType:    "application/gzip",
+			Path:         run.defaultPath,
+			Labels:       map[string]string{"tier": "smoke"},
+			Annotations:  map[string]string{"note": "built"},
+			Digest:       "sha256:" + run.sha256,
+			Size:         int64(len(run.artifactBody)),
+		})
+		assertBuildMetadata(t, run.secureBootMetadataPath, core.ResolvedArtifact{
+			ArtifactKey:  core.ArtifactKey("secureboot"),
+			ImageName:    "test-image",
+			Variant:      core.VariantName("secureboot"),
+			Provider:     core.ProviderName("incusos"),
+			Os:           "incusos",
+			Architecture: core.Architecture("amd64"),
+			Format:       core.ArtifactFormat("raw.gz"),
+			MediaType:    "application/gzip",
+			Path:         run.secureBootPath,
+			Digest:       "sha256:" + run.sha256,
+			Size:         int64(len(run.artifactBody)),
+		})
+		assertSuccessfulBuildAdapters(t, run)
+	})
+
+	t.Run("prints high-level JSON summary", func(t *testing.T) {
+		run := runSuccessfulBuildCommand(t, "--format", "json")
+
+		require.NoError(t, run.result.err)
+		assert.Empty(t, run.result.stderr)
+		var summary buildOutputSummary
+		require.NoError(t, json.Unmarshal([]byte(run.result.stdout), &summary))
+		assert.Equal(t, buildOutputSummary{
+			Image: core.Image{Name: core.Name("test-image")},
+			Artifacts: []buildArtifactOutputSummary{
+				{
+					ArtifactKey:  core.ArtifactKey("default"),
+					Variant:      core.VariantName("default"),
+					Provider:     core.ProviderName("incusos"),
+					Os:           "incusos",
+					Architecture: core.Architecture("amd64"),
+					Format:       core.ArtifactFormat("raw.gz"),
+					Path:         run.defaultPath,
+					MetadataPath: run.defaultMetadataPath,
+					Size:         int64(len(run.artifactBody)),
+					SHA256:       run.sha256,
+				},
+				{
+					ArtifactKey:  core.ArtifactKey("secureboot"),
+					Variant:      core.VariantName("secureboot"),
+					Provider:     core.ProviderName("incusos"),
+					Os:           "incusos",
+					Architecture: core.Architecture("amd64"),
+					Format:       core.ArtifactFormat("raw.gz"),
+					Path:         run.secureBootPath,
+					MetadataPath: run.secureBootMetadataPath,
+					Size:         int64(len(run.artifactBody)),
+					SHA256:       run.sha256,
+				},
+			},
+		}, summary)
+		assert.FileExists(t, run.defaultMetadataPath)
+		assert.FileExists(t, run.secureBootMetadataPath)
+	})
+
+	t.Run("paths format preserves path-only stdout", func(t *testing.T) {
+		run := runSuccessfulBuildCommand(t, "--format", "paths")
+
+		require.NoError(t, run.result.err)
+		assert.Equal(t, run.defaultPath+"\n"+run.secureBootPath+"\n", run.result.stdout)
+		assert.Empty(t, run.result.stderr)
+		assert.FileExists(t, run.defaultMetadataPath)
+		assert.FileExists(t, run.secureBootMetadataPath)
+	})
+
+	t.Run("invalid format fails before reading config or building", func(t *testing.T) {
+		clearIMGCLIEnv(t)
+
+		result := executeCommand(t, Options{}, "build", "--format", "yaml", "missing.cue")
+
+		require.Error(t, result.err)
+		require.ErrorContains(t, result.err, `invalid build output format "yaml"`)
+		assert.Empty(t, result.stdout)
+		assert.Empty(t, result.stderr)
 	})
 }
 
@@ -722,6 +790,147 @@ func TestPublishConfigIsPublishOnly(t *testing.T) {
 		assert.Empty(t, result.stdout)
 		assert.Empty(t, result.stderr)
 	})
+}
+
+type buildCommandRun struct {
+	result                 commandResult
+	artifactBody           []byte
+	sha256                 string
+	cacheDir               string
+	defaultPath            string
+	defaultMetadataPath    string
+	secureBootPath         string
+	secureBootMetadataPath string
+	catalog                *testCatalog
+	downloader             *testDownloader
+	seedBuilder            *testSeedBuilder
+	injector               *testImageInjector
+}
+
+func runSuccessfulBuildCommand(t *testing.T, buildArgs ...string) buildCommandRun {
+	t.Helper()
+
+	clearIMGCLIEnv(t)
+	outputDir := filepath.Join(t.TempDir(), "out")
+	configPath := writeImageConfig(t, `
+apiVersion: "imgcli.meigma.io/v0alpha1"
+kind:       "ImagePlan"
+image: name: "test-image"
+output: dir: "`+outputDir+`"
+incusos: {
+	defaults: source: {
+		channel: "testing"
+		version: "202604261712"
+	}
+	seed: install: {}
+	variants: {
+		secureboot: artifact: {
+			architecture: "amd64"
+			format:       "raw.gz"
+		}
+		default: artifact: {
+			architecture: "amd64"
+			format:       "raw.gz"
+			labels: tier: "smoke"
+			annotations: note: "built"
+		}
+	}
+}
+`)
+	artifactBody := []byte("artifact")
+	artifactSHA256 := strings.Repeat("abcdef0123456789", 4)
+	defaultPath := filepath.Join(outputDir, "test-image-default-amd64.raw.gz")
+	secureBootPath := filepath.Join(outputDir, "test-image-secureboot-amd64.raw.gz")
+	catalog := &testCatalog{
+		asset: incusos.ImageAsset{
+			URL:    "https://example.invalid/os/202604261712/x86_64/IncusOS_202604261712.img.gz",
+			SHA256: "source-sha",
+			Size:   42,
+		},
+	}
+	downloader := &testDownloader{
+		image: incusos.DownloadedImage{
+			Path:   "/cache/source.img.gz",
+			SHA256: "source-sha",
+			Size:   42,
+		},
+	}
+	seedBuilder := &testSeedBuilder{
+		seed: incusos.SeedArchive{Data: []byte("seed")},
+	}
+	injector := &testImageInjector{
+		body:   artifactBody,
+		sha256: artifactSHA256,
+	}
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+
+	args := []string{"--cache-dir", cacheDir, "build"}
+	args = append(args, buildArgs...)
+	args = append(args, configPath)
+
+	result := executeCommand(t, Options{
+		IncusOSCatalog:       catalog,
+		IncusOSDownloader:    downloader,
+		IncusOSSeedBuilder:   seedBuilder,
+		IncusOSImageInjector: injector,
+	}, args...)
+
+	return buildCommandRun{
+		result:                 result,
+		artifactBody:           artifactBody,
+		sha256:                 artifactSHA256,
+		cacheDir:               cacheDir,
+		defaultPath:            defaultPath,
+		defaultMetadataPath:    buildArtifactMetadataPath(defaultPath),
+		secureBootPath:         secureBootPath,
+		secureBootMetadataPath: buildArtifactMetadataPath(secureBootPath),
+		catalog:                catalog,
+		downloader:             downloader,
+		seedBuilder:            seedBuilder,
+		injector:               injector,
+	}
+}
+
+func assertBuildMetadata(t *testing.T, path string, want core.ResolvedArtifact) {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var metadata imgschemas.ArtifactMetadata
+	require.NoError(t, json.Unmarshal(data, &metadata))
+	assert.Equal(t, artifactMetadataAPIVersion, metadata.ApiVersion)
+	assert.Equal(t, artifactMetadataKind, metadata.Kind)
+	assert.Equal(t, want, metadata.Artifact)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(artifactMetadataFileMode), info.Mode().Perm())
+}
+
+func assertSuccessfulBuildAdapters(t *testing.T, run buildCommandRun) {
+	t.Helper()
+
+	assert.NoDirExists(t, run.cacheDir)
+	require.Len(t, run.catalog.queries, 2)
+	assert.Equal(t, []incusos.ImageQuery{
+		{
+			Channel:      incusos.ChannelTesting,
+			Version:      incusos.Version("202604261712"),
+			Architecture: core.Architecture("amd64"),
+			Type:         incusos.ImageTypeRaw,
+		},
+		{
+			Channel:      incusos.ChannelTesting,
+			Version:      incusos.Version("202604261712"),
+			Architecture: core.Architecture("amd64"),
+			Type:         incusos.ImageTypeRaw,
+		},
+	}, run.catalog.queries)
+	assert.Equal(t, []incusos.ImageAsset{run.catalog.asset, run.catalog.asset}, run.downloader.assets)
+	assert.Len(t, run.seedBuilder.configs, 1)
+	require.Len(t, run.injector.calls, 2)
+	assert.Equal(t, run.defaultPath, run.injector.calls[0].outputPath)
+	assert.Equal(t, run.secureBootPath, run.injector.calls[1].outputPath)
 }
 
 func executeCommand(t *testing.T, opts Options, args ...string) commandResult {
