@@ -6,8 +6,14 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	imgsrv "github.com/meigma/imgsrv/client"
+)
+
+const (
+	defaultPublisherTimeout      = time.Minute
+	defaultPublisherPollInterval = time.Second
 )
 
 // CatalogClient is the imgsrv catalog operation seam used by the release publisher.
@@ -15,7 +21,8 @@ type CatalogClient interface {
 	CreateImage(context.Context, imgsrv.CreateImageRequest) (imgsrv.Image, error)
 	CreateDraftVersion(context.Context, string, imgsrv.CreateDraftVersionRequest) (imgsrv.ImageVersion, error)
 	AddArtifact(context.Context, string, string, imgsrv.AddArtifactRequest) (imgsrv.Artifact, error)
-	PublishVersion(context.Context, string, string) (imgsrv.ImageVersion, error)
+	PublishVersion(context.Context, string, string) (imgsrv.PublishJob, error)
+	GetPublishJob(context.Context, string) (imgsrv.PublishJob, error)
 	PutAlias(context.Context, string, string, imgsrv.PutAliasRequest) (imgsrv.Alias, error)
 }
 
@@ -23,6 +30,13 @@ type CatalogClient interface {
 type Publisher struct {
 	uploader *Uploader
 	catalog  CatalogClient
+	options  PublisherOptions
+}
+
+// PublisherOptions configures release publication.
+type PublisherOptions struct {
+	Timeout      time.Duration
+	PollInterval time.Duration
 }
 
 // ReleaseRequest describes one image release publication.
@@ -76,17 +90,35 @@ type uploadedReleaseArtifact struct {
 }
 
 // NewPublisher constructs a release publisher.
-func NewPublisher(catalog CatalogClient, uploader *Uploader) (*Publisher, error) {
+func NewPublisher(catalog CatalogClient, uploader *Uploader, options ...PublisherOptions) (*Publisher, error) {
 	if catalog == nil {
 		return nil, errors.New("configure imgsrv publisher: catalog client is required")
 	}
 	if uploader == nil {
 		return nil, errors.New("configure imgsrv publisher: uploader is required")
 	}
+	if len(options) > 1 {
+		return nil, errors.New("configure imgsrv publisher: at most one options value is supported")
+	}
+
+	publisherOptions := PublisherOptions{
+		Timeout:      defaultPublisherTimeout,
+		PollInterval: defaultPublisherPollInterval,
+	}
+	if len(options) == 1 {
+		publisherOptions = options[0]
+	}
+	if publisherOptions.Timeout <= 0 {
+		return nil, errors.New("configure imgsrv publisher: publish timeout must be positive")
+	}
+	if publisherOptions.PollInterval <= 0 {
+		return nil, errors.New("configure imgsrv publisher: publish poll interval must be positive")
+	}
 
 	return &Publisher{
 		uploader: uploader,
 		catalog:  catalog,
+		options:  publisherOptions,
 	}, nil
 }
 
@@ -147,7 +179,7 @@ func (p *Publisher) PublishRelease(ctx context.Context, request ReleaseRequest) 
 		result.Artifacts = append(result.Artifacts, published)
 	}
 
-	publishedVersion, err := p.catalog.PublishVersion(ctx, request.ImageName, request.Version)
+	publishJob, err := p.catalog.PublishVersion(ctx, request.ImageName, request.Version)
 	if err != nil {
 		return ReleaseResult{}, fmt.Errorf(
 			"publish imgsrv version %s %s: %w",
@@ -156,7 +188,10 @@ func (p *Publisher) PublishRelease(ctx context.Context, request ReleaseRequest) 
 			err,
 		)
 	}
-	result.State = publishedVersion.State
+	if _, err := p.waitPublished(ctx, publishJob); err != nil {
+		return ReleaseResult{}, err
+	}
+	result.State = imgsrv.ImageVersionStatePublished
 
 	for _, alias := range request.Aliases {
 		if _, err := p.catalog.PutAlias(ctx, request.ImageName, alias, imgsrv.PutAliasRequest{
@@ -219,6 +254,7 @@ func (p *Publisher) addArtifact(
 	artifact uploadedReleaseArtifact,
 ) (PublishedReleaseArtifact, error) {
 	added, err := p.catalog.AddArtifact(ctx, request.ImageName, request.Version, imgsrv.AddArtifactRequest{
+		Variant:              artifact.request.Variant,
 		OperatingSystem:      artifact.request.OperatingSystem,
 		Architecture:         artifact.request.Architecture,
 		Format:               artifact.request.Format,
@@ -238,7 +274,7 @@ func (p *Publisher) addArtifact(
 
 	return PublishedReleaseArtifact{
 		ArtifactKey:      artifact.request.Key,
-		Variant:          artifact.request.Variant,
+		Variant:          added.Variant,
 		LocalPath:        artifact.request.LocalPath,
 		ServerArtifactID: added.ID.String(),
 		OperatingSystem:  added.OperatingSystem,
@@ -248,6 +284,67 @@ func (p *Publisher) addArtifact(
 		Size:             added.PrimaryBlobSizeBytes,
 		MediaType:        added.PrimaryMediaType,
 	}, nil
+}
+
+func (p *Publisher) waitPublished(ctx context.Context, job imgsrv.PublishJob) (imgsrv.PublishJob, error) {
+	finalJob, err := p.publishJobResult(job)
+	if err != nil {
+		return imgsrv.PublishJob{}, err
+	}
+	if finalJob.State == imgsrv.PublishJobStateSucceeded {
+		return finalJob, nil
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, p.options.Timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(p.options.PollInterval)
+	defer ticker.Stop()
+
+	last := job
+	for {
+		select {
+		case <-waitCtx.Done():
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				return imgsrv.PublishJob{}, fmt.Errorf(
+					"publish imgsrv job %s did not finish before timeout; last state was %q",
+					last.ID,
+					last.State,
+				)
+			}
+			return imgsrv.PublishJob{}, fmt.Errorf("wait for imgsrv publish job %s: %w", job.ID, waitCtx.Err())
+		case <-ticker.C:
+			current, err := p.catalog.GetPublishJob(waitCtx, job.ID.String())
+			if err != nil {
+				return imgsrv.PublishJob{}, fmt.Errorf("get imgsrv publish job %s status: %w", job.ID, err)
+			}
+			finalJob, err := p.publishJobResult(current)
+			if err != nil {
+				return imgsrv.PublishJob{}, err
+			}
+			if finalJob.State == imgsrv.PublishJobStateSucceeded {
+				return finalJob, nil
+			}
+			last = current
+		}
+	}
+}
+
+func (p *Publisher) publishJobResult(job imgsrv.PublishJob) (imgsrv.PublishJob, error) {
+	switch job.State {
+	case imgsrv.PublishJobStateSucceeded:
+		return job, nil
+	case imgsrv.PublishJobStateFailed:
+		message := "unknown failure"
+		if job.FailureMessage != nil && strings.TrimSpace(*job.FailureMessage) != "" {
+			message = strings.TrimSpace(*job.FailureMessage)
+		}
+		return imgsrv.PublishJob{}, fmt.Errorf("publish imgsrv job %s failed: %s", job.ID, message)
+	case imgsrv.PublishJobStateQueued, imgsrv.PublishJobStateRunning:
+		return imgsrv.PublishJob{}, nil
+	default:
+		return imgsrv.PublishJob{}, fmt.Errorf("publish imgsrv job %s entered unsupported state %q", job.ID, job.State)
+	}
 }
 
 func uploadArtifact(artifact ReleaseArtifact) Artifact {

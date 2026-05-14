@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/meigma/imgcli/internal/providers"
@@ -77,33 +78,7 @@ func (p *Provider) Build(ctx context.Context, req providers.BuildRequest) (provi
 		return providers.BuildResult{}, errors.New("incusos image injector is required")
 	}
 
-	variantName, variant, err := singleVariant(p.config)
-	if err != nil {
-		return providers.BuildResult{}, err
-	}
-
-	imageType, err := imageTypeForFormat(variant.Artifact.Format)
-	if err != nil {
-		return providers.BuildResult{}, err
-	}
-
-	outputPath, err := artifactOutputPath(req, variantName, variant.Artifact)
-	if err != nil {
-		return providers.BuildResult{}, err
-	}
-
-	source := resolveSource(p.config.Defaults, variant.Source)
-	asset, err := p.options.Catalog.ResolveImage(ctx, ImageQuery{
-		Channel:      source.Channel,
-		Version:      source.Version,
-		Architecture: variant.Artifact.Architecture,
-		Type:         imageType,
-	})
-	if err != nil {
-		return providers.BuildResult{}, err
-	}
-
-	downloaded, err := p.options.Downloader.DownloadImage(ctx, asset)
+	artifacts, err := planArtifacts(req, p.config)
 	if err != nil {
 		return providers.BuildResult{}, err
 	}
@@ -113,54 +88,110 @@ func (p *Provider) Build(ctx context.Context, req providers.BuildRequest) (provi
 		return providers.BuildResult{}, err
 	}
 
-	customized, err := p.options.ImageInjector.InjectSeed(ctx, downloaded, seed, outputPath)
-	if err != nil {
-		return providers.BuildResult{}, err
+	builtArtifacts := make([]providers.BuiltArtifact, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		source := resolveSource(p.config.Defaults, artifact.variant.Source)
+		asset, err := p.options.Catalog.ResolveImage(ctx, ImageQuery{
+			Channel:      source.Channel,
+			Version:      source.Version,
+			Architecture: artifact.variant.Artifact.Architecture,
+			Type:         artifact.imageType,
+		})
+		if err != nil {
+			return providers.BuildResult{}, err
+		}
+
+		downloaded, err := p.options.Downloader.DownloadImage(ctx, asset)
+		if err != nil {
+			return providers.BuildResult{}, err
+		}
+
+		customized, err := p.options.ImageInjector.InjectSeed(ctx, downloaded, seed, artifact.plan.OutputPath)
+		if err != nil {
+			return providers.BuildResult{}, err
+		}
+
+		builtArtifacts = append(builtArtifacts, providers.BuiltArtifact{
+			Plan:   artifact.plan,
+			Path:   customized.Path,
+			Size:   customized.Size,
+			SHA256: customized.SHA256,
+		})
 	}
 
-	artifactPlan := providers.ArtifactPlan{
-		Key:             core.ArtifactKey(variantName),
-		Variant:         variantName,
-		Architecture:    variant.Artifact.Architecture,
-		OperatingSystem: artifactOperatingSystem(variant.Artifact),
-		Format:          variant.Artifact.Format,
-		MediaType:       artifactMediaType(variant.Artifact),
-		OutputPath:      outputPath,
-		Labels:          variant.Artifact.Labels,
-		Annotations:     variant.Artifact.Annotations,
-	}
 	plan := req.Plan
 	plan.Provider = providerName
 	plan.OutputDir = outputDir(req)
-	plan.Artifacts = []providers.ArtifactPlan{artifactPlan}
+	plan.Artifacts = make([]providers.ArtifactPlan, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		plan.Artifacts = append(plan.Artifacts, artifact.plan)
+	}
 
 	return providers.BuildResult{
-		Plan: plan,
-		Artifacts: []providers.BuiltArtifact{
-			{
-				Plan:   artifactPlan,
-				Path:   customized.Path,
-				Size:   customized.Size,
-				SHA256: customized.SHA256,
-			},
-		},
+		Plan:      plan,
+		Artifacts: builtArtifacts,
 	}, nil
 }
 
-func singleVariant(config Config) (core.VariantName, incusosschema.Variant, error) {
-	switch len(config.Variants) {
-	case 0:
-		return "", incusosschema.Variant{}, errors.New("incusos build requires exactly one variant, got 0")
-	case 1:
-		for name, variant := range config.Variants {
-			return name, variant, nil
-		}
+type plannedArtifact struct {
+	variant   incusosschema.Variant
+	imageType ImageType
+	plan      providers.ArtifactPlan
+}
+
+func planArtifacts(req providers.BuildRequest, config Config) ([]plannedArtifact, error) {
+	if len(config.Variants) == 0 {
+		return nil, errors.New("incusos build requires at least one variant")
 	}
 
-	return "", incusosschema.Variant{}, fmt.Errorf(
-		"incusos build requires exactly one variant, got %d",
-		len(config.Variants),
-	)
+	names := make([]string, 0, len(config.Variants))
+	for name := range config.Variants {
+		names = append(names, string(name))
+	}
+	sort.Strings(names)
+
+	artifacts := make([]plannedArtifact, 0, len(names))
+	outputPaths := map[string]core.VariantName{}
+	for _, name := range names {
+		variantName := core.VariantName(name)
+		variant := config.Variants[variantName]
+		imageType, err := imageTypeForFormat(variant.Artifact.Format)
+		if err != nil {
+			return nil, err
+		}
+		outputPath, err := artifactOutputPath(req, variantName, variant.Artifact)
+		if err != nil {
+			return nil, err
+		}
+		if previous, exists := outputPaths[outputPath]; exists {
+			return nil, fmt.Errorf(
+				"incusos artifact output path %q is used by variants %q and %q",
+				outputPath,
+				previous,
+				variantName,
+			)
+		}
+		outputPaths[outputPath] = variantName
+
+		artifactPlan := providers.ArtifactPlan{
+			Key:             core.ArtifactKey(variantName),
+			Variant:         variantName,
+			Architecture:    variant.Artifact.Architecture,
+			OperatingSystem: artifactOperatingSystem(variant.Artifact),
+			Format:          variant.Artifact.Format,
+			MediaType:       artifactMediaType(variant.Artifact),
+			OutputPath:      outputPath,
+			Labels:          variant.Artifact.Labels,
+			Annotations:     variant.Artifact.Annotations,
+		}
+		artifacts = append(artifacts, plannedArtifact{
+			variant:   variant,
+			imageType: imageType,
+			plan:      artifactPlan,
+		})
+	}
+
+	return artifacts, nil
 }
 
 func artifactOutputPath(

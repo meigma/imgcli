@@ -161,6 +161,172 @@ func TestProviderBuildCreatesCustomizedImage(t *testing.T) {
 	}
 }
 
+func TestProviderBuildCreatesMultipleVariantsInStableOrder(t *testing.T) {
+	ctx := context.Background()
+	outputDir := t.TempDir()
+	asset := ImageAsset{
+		Version:      Version("202604261712"),
+		Architecture: core.Architecture("amd64"),
+		Type:         ImageTypeRaw,
+		URL:          "https://example.invalid/incusos.img.gz",
+		SHA256:       "source-sha",
+		Size:         42,
+	}
+	downloaded := DownloadedImage{
+		Asset:  asset,
+		Path:   "/cache/source.img.gz",
+		SHA256: "source-sha",
+		Size:   42,
+	}
+	seed := SeedArchive{Data: []byte("seed")}
+	customized := CustomizedImage{
+		Source: downloaded,
+		Size:   99,
+		SHA256: "custom-sha",
+	}
+	catalog := &recordingCatalog{asset: asset}
+	downloader := &recordingDownloader{image: downloaded}
+	seedBuilder := &recordingSeedBuilder{seed: seed}
+	injector := &recordingImageInjector{image: customized}
+	config := Config{
+		Defaults: &incusosschema.Defaults{
+			Source: &incusosschema.Source{
+				Channel: ChannelStable,
+				Version: Version("202604202240"),
+			},
+		},
+		Seed: &incusosschema.Seed{},
+		Variants: map[core.VariantName]incusosschema.Variant{
+			"secureboot": {
+				Artifact: core.ArtifactIntent{
+					Architecture: core.Architecture("amd64"),
+					Format:       core.ArtifactFormat("raw.gz"),
+				},
+			},
+			"default": {
+				Source: &incusosschema.Source{
+					Channel: ChannelTesting,
+					Version: Version("202604261712"),
+				},
+				Artifact: core.ArtifactIntent{
+					Architecture: core.Architecture("amd64"),
+					Format:       core.ArtifactFormat("raw.gz"),
+				},
+			},
+		},
+	}
+	provider := New(config, Options{
+		Catalog:       catalog,
+		Downloader:    downloader,
+		SeedBuilder:   seedBuilder,
+		ImageInjector: injector,
+	})
+
+	result, err := provider.Build(ctx, providers.BuildRequest{
+		Plan: providers.Plan{
+			Image: core.Image{Name: core.Name("test-image")},
+		},
+		OutputDir: outputDir,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, []ImageQuery{
+		{
+			Channel:      ChannelTesting,
+			Version:      Version("202604261712"),
+			Architecture: core.Architecture("amd64"),
+			Type:         ImageTypeRaw,
+		},
+		{
+			Channel:      ChannelStable,
+			Version:      Version("202604202240"),
+			Architecture: core.Architecture("amd64"),
+			Type:         ImageTypeRaw,
+		},
+	}, catalog.queries)
+	assert.Equal(t, []Config{config}, seedBuilder.configs)
+	require.Len(t, result.Artifacts, 2)
+	assert.Equal(t, []providers.ArtifactPlan{
+		{
+			Key:             core.ArtifactKey("default"),
+			Variant:         core.VariantName("default"),
+			Architecture:    core.Architecture("amd64"),
+			OperatingSystem: "incusos",
+			Format:          core.ArtifactFormat("raw.gz"),
+			MediaType:       "application/gzip",
+			OutputPath:      filepath.Join(outputDir, "test-image-default-amd64.raw.gz"),
+		},
+		{
+			Key:             core.ArtifactKey("secureboot"),
+			Variant:         core.VariantName("secureboot"),
+			Architecture:    core.Architecture("amd64"),
+			OperatingSystem: "incusos",
+			Format:          core.ArtifactFormat("raw.gz"),
+			MediaType:       "application/gzip",
+			OutputPath:      filepath.Join(outputDir, "test-image-secureboot-amd64.raw.gz"),
+		},
+	}, result.Plan.Artifacts)
+	assert.Equal(t, result.Plan.Artifacts[0], result.Artifacts[0].Plan)
+	assert.Equal(t, result.Plan.Artifacts[1], result.Artifacts[1].Plan)
+	assert.Equal(t, []injectCall{
+		{
+			image:      downloaded,
+			seed:       seed,
+			outputPath: filepath.Join(outputDir, "test-image-default-amd64.raw.gz"),
+		},
+		{
+			image:      downloaded,
+			seed:       seed,
+			outputPath: filepath.Join(outputDir, "test-image-secureboot-amd64.raw.gz"),
+		},
+	}, injector.calls)
+}
+
+func TestProviderBuildRejectsDuplicateOutputPathsBeforeBuild(t *testing.T) {
+	catalog := &recordingCatalog{asset: ImageAsset{}}
+	downloader := &recordingDownloader{}
+	seedBuilder := &recordingSeedBuilder{seed: SeedArchive{Data: []byte("seed")}}
+	injector := &recordingImageInjector{}
+	config := Config{
+		Seed: &incusosschema.Seed{},
+		Variants: map[core.VariantName]incusosschema.Variant{
+			"default": {
+				Artifact: core.ArtifactIntent{
+					Architecture: core.Architecture("amd64"),
+					Format:       core.ArtifactFormat("raw.gz"),
+					Filename:     "same.img.gz",
+				},
+			},
+			"secureboot": {
+				Artifact: core.ArtifactIntent{
+					Architecture: core.Architecture("amd64"),
+					Format:       core.ArtifactFormat("raw.gz"),
+					Filename:     "same.img.gz",
+				},
+			},
+		},
+	}
+	provider := New(config, Options{
+		Catalog:       catalog,
+		Downloader:    downloader,
+		SeedBuilder:   seedBuilder,
+		ImageInjector: injector,
+	})
+
+	result, err := provider.Build(context.Background(), providers.BuildRequest{
+		Plan:      providers.Plan{Image: core.Image{Name: core.Name("test-image")}},
+		OutputDir: t.TempDir(),
+	})
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "incusos artifact output path")
+	assert.Empty(t, result)
+	assert.Empty(t, catalog.queries)
+	assert.Empty(t, downloader.assets)
+	assert.Empty(t, seedBuilder.configs)
+	assert.Empty(t, injector.calls)
+}
+
 func TestProviderBuildErrors(t *testing.T) {
 	catalogErr := errors.New("catalog failed")
 	downloadErr := errors.New("download failed")
@@ -204,18 +370,7 @@ func TestProviderBuildErrors(t *testing.T) {
 				Variants: map[core.VariantName]incusosschema.Variant{},
 			},
 			options: optionsWithout(func(_ *Options) {}),
-			wantErr: "incusos build requires exactly one variant, got 0",
-		},
-		{
-			name: "multiple variants",
-			config: Config{
-				Variants: map[core.VariantName]incusosschema.Variant{
-					"default": {},
-					"other":   {},
-				},
-			},
-			options: optionsWithout(func(_ *Options) {}),
-			wantErr: "incusos build requires exactly one variant, got 2",
+			wantErr: "incusos build requires at least one variant",
 		},
 		{
 			name:    "unsupported format",
