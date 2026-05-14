@@ -25,6 +25,13 @@ import (
 
 #ArtifactIntent: core.#ArtifactIntent
 
+#ArtifactMetadata: {
+	apiVersion: "imgcli.meigma.io/v0alpha1"
+	kind:       "ArtifactMetadata"
+
+	artifact: core.#ResolvedArtifact
+}
+
 #ResolvedArtifact: core.#ResolvedArtifact
 
 #ResolvedPlan: core.#ResolvedPlan

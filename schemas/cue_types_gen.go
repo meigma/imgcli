@@ -29,6 +29,14 @@ type PublishIntent core.PublishIntent
 
 type ArtifactIntent core.ArtifactIntent
 
+type ArtifactMetadata struct {
+	ApiVersion string `json:"apiVersion"`
+
+	Kind string `json:"kind"`
+
+	Artifact core.ResolvedArtifact `json:"artifact"`
+}
+
 type ResolvedArtifact core.ResolvedArtifact
 
 type ResolvedPlan core.ResolvedPlan
