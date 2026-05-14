@@ -416,6 +416,7 @@ incusos: {
 			Once()
 		publishCatalog.EXPECT().
 			AddArtifact(mock.Anything, "published-image", "v1.0.0", imgsrv.AddArtifactRequest{
+				Variant:              "default",
 				OperatingSystem:      "incusos",
 				Architecture:         "x86_64",
 				Format:               imgsrv.ArtifactFormatRawGZ,
@@ -425,6 +426,7 @@ incusos: {
 			}).
 			Return(imgsrv.Artifact{
 				ID:                   "artifact-1",
+				Variant:              "default",
 				OperatingSystem:      "incusos",
 				Architecture:         "x86_64",
 				Format:               imgsrv.ArtifactFormatRawGZ,
@@ -435,7 +437,21 @@ incusos: {
 			Once()
 		publishCatalog.EXPECT().
 			PublishVersion(mock.Anything, "published-image", "v1.0.0").
-			Return(imgsrv.ImageVersion{Version: "v1.0.0", State: imgsrv.ImageVersionStatePublished}, nil).
+			Return(imgsrv.PublishJob{
+				ID:        "publish-job-1",
+				ImageName: "published-image",
+				Version:   "v1.0.0",
+				State:     imgsrv.PublishJobStateQueued,
+			}, nil).
+			Once()
+		publishCatalog.EXPECT().
+			GetPublishJob(mock.Anything, "publish-job-1").
+			Return(imgsrv.PublishJob{
+				ID:        "publish-job-1",
+				ImageName: "published-image",
+				Version:   "v1.0.0",
+				State:     imgsrv.PublishJobStateSucceeded,
+			}, nil).
 			Once()
 		publishCatalog.EXPECT().
 			PutAlias(mock.Anything, "published-image", "latest", imgsrv.PutAliasRequest{Version: "v1.0.0"}).

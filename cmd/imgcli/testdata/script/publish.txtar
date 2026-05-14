@@ -7,8 +7,11 @@ stdout '"aliases":\["latest"\]'
 stdout '"operatingSystem":"incusos"'
 stdout '"architecture":"x86_64"'
 stdout '"format":"raw.gz"'
+stdout '"variant":"default"'
+stdout '"variant":"secureboot"'
 ! stderr .
 exists out/script-image-default-amd64.raw.gz
+exists out/script-image-secureboot-amd64.raw.gz
 cp stdout publish.json
 verify-publish publish.json script-image 2026.05.06 latest
 
@@ -21,6 +24,13 @@ incusos: {
 	defaults: source: channel: "testing"
 	seed: install: {}
 	variants: default: {
+		source: version: "202604261712"
+		artifact: {
+			architecture: "amd64"
+			format:       "raw.gz"
+		}
+	}
+	variants: secureboot: {
 		source: version: "202604261712"
 		artifact: {
 			architecture: "amd64"

@@ -254,23 +254,89 @@ func (_c *MockCatalogClient_CreateImage_Call) RunAndReturn(run func(context1 con
 	return _c
 }
 
+// GetPublishJob provides a mock function for the type MockCatalogClient
+func (_mock *MockCatalogClient) GetPublishJob(context1 context.Context, s string) (client.PublishJob, error) {
+	ret := _mock.Called(context1, s)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetPublishJob")
+	}
+
+	var r0 client.PublishJob
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) (client.PublishJob, error)); ok {
+		return returnFunc(context1, s)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) client.PublishJob); ok {
+		r0 = returnFunc(context1, s)
+	} else {
+		r0 = ret.Get(0).(client.PublishJob)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = returnFunc(context1, s)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockCatalogClient_GetPublishJob_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetPublishJob'
+type MockCatalogClient_GetPublishJob_Call struct {
+	*mock.Call
+}
+
+// GetPublishJob is a helper method to define mock.On call
+//   - context1 context.Context
+//   - s string
+func (_e *MockCatalogClient_Expecter) GetPublishJob(context1 interface{}, s interface{}) *MockCatalogClient_GetPublishJob_Call {
+	return &MockCatalogClient_GetPublishJob_Call{Call: _e.mock.On("GetPublishJob", context1, s)}
+}
+
+func (_c *MockCatalogClient_GetPublishJob_Call) Run(run func(context1 context.Context, s string)) *MockCatalogClient_GetPublishJob_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockCatalogClient_GetPublishJob_Call) Return(publishJob client.PublishJob, err error) *MockCatalogClient_GetPublishJob_Call {
+	_c.Call.Return(publishJob, err)
+	return _c
+}
+
+func (_c *MockCatalogClient_GetPublishJob_Call) RunAndReturn(run func(context1 context.Context, s string) (client.PublishJob, error)) *MockCatalogClient_GetPublishJob_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // PublishVersion provides a mock function for the type MockCatalogClient
-func (_mock *MockCatalogClient) PublishVersion(context1 context.Context, s string, s1 string) (client.ImageVersion, error) {
+func (_mock *MockCatalogClient) PublishVersion(context1 context.Context, s string, s1 string) (client.PublishJob, error) {
 	ret := _mock.Called(context1, s, s1)
 
 	if len(ret) == 0 {
 		panic("no return value specified for PublishVersion")
 	}
 
-	var r0 client.ImageVersion
+	var r0 client.PublishJob
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string) (client.ImageVersion, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string) (client.PublishJob, error)); ok {
 		return returnFunc(context1, s, s1)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string) client.ImageVersion); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string) client.PublishJob); ok {
 		r0 = returnFunc(context1, s, s1)
 	} else {
-		r0 = ret.Get(0).(client.ImageVersion)
+		r0 = ret.Get(0).(client.PublishJob)
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, string, string) error); ok {
 		r1 = returnFunc(context1, s, s1)
@@ -316,12 +382,12 @@ func (_c *MockCatalogClient_PublishVersion_Call) Run(run func(context1 context.C
 	return _c
 }
 
-func (_c *MockCatalogClient_PublishVersion_Call) Return(imageVersion client.ImageVersion, err error) *MockCatalogClient_PublishVersion_Call {
-	_c.Call.Return(imageVersion, err)
+func (_c *MockCatalogClient_PublishVersion_Call) Return(publishJob client.PublishJob, err error) *MockCatalogClient_PublishVersion_Call {
+	_c.Call.Return(publishJob, err)
 	return _c
 }
 
-func (_c *MockCatalogClient_PublishVersion_Call) RunAndReturn(run func(context1 context.Context, s string, s1 string) (client.ImageVersion, error)) *MockCatalogClient_PublishVersion_Call {
+func (_c *MockCatalogClient_PublishVersion_Call) RunAndReturn(run func(context1 context.Context, s string, s1 string) (client.PublishJob, error)) *MockCatalogClient_PublishVersion_Call {
 	_c.Call.Return(run)
 	return _c
 }

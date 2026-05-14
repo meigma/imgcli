@@ -57,7 +57,10 @@ func newPublishCommand(rt *runtime) *cobra.Command {
 				return err
 			}
 
-			publisher, err := publish.NewPublisher(catalogClient, uploader)
+			publisher, err := publish.NewPublisher(catalogClient, uploader, publish.PublisherOptions{
+				Timeout:      pubConfig.timeout,
+				PollInterval: pubConfig.pollInterval,
+			})
 			if err != nil {
 				return err
 			}

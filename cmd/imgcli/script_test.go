@@ -31,8 +31,7 @@ const (
 	testEnvIncusOSCDNURL   = "IMGCLI_TEST_INCUSOS_CDN_URL"
 	testEnvFixtureInjector = "IMGCLI_TEST_FIXTURE_INJECTOR"
 
-	testImgsrvToken = "testtok.imgcli-script"
-	testVersion     = "2026.05.06"
+	testVersion = "2026.05.06"
 
 	fixtureSourcePath = "/202604261712/x86_64/IncusOS_202604261712.img.gz"
 	fixtureSourceBody = "fixture IncusOS source image bytes\n"
@@ -79,7 +78,7 @@ func setupScript(env *testscript.Env) error {
 	}
 	tb.Helper()
 
-	imgsrvEnv := imgsrvtest.Start(tb, imgsrvtest.WithCASPromotion(), imgsrvtest.WithAPIToken(testImgsrvToken))
+	imgsrvEnv := imgsrvtest.Start(tb, imgsrvtest.WithCASPromotion(), imgsrvtest.WithAPIToken())
 	cdnServer := newFixtureCDNServer(tb)
 
 	env.Values[testscriptEnvKey{}] = imgsrvEnv
@@ -88,7 +87,7 @@ func setupScript(env *testscript.Env) error {
 	env.Setenv("IMGCLI_CACHE_DIR", filepath.Join(env.WorkDir, "cache"))
 	env.Setenv("IMGCLI_CACHE_MAX_SIZE", "0")
 	env.Setenv("IMGSRV_URL", imgsrvEnv.BaseURL())
-	env.Setenv("IMGSRV_TOKEN", testImgsrvToken)
+	env.Setenv("IMGSRV_TOKEN", imgsrvEnv.ClientOptions().BearerToken)
 	env.Setenv("PUBLISH_VERSION", testVersion)
 	env.Setenv(testEnvIncusOSCDNURL, cdnServer.URL)
 	env.Setenv(testEnvFixtureInjector, "1")
@@ -156,7 +155,7 @@ func verifyPublish(ts *testscript.TestScript, neg bool, args []string) {
 
 	result := readPublishResult(ts, args[0])
 	assertPublishResult(ts, result, args[1], args[2], args[3])
-	verifyPublishedArtifact(ts, args[1], args[2], args[3], result.Artifacts[0].ServerArtifactID)
+	verifyPublishedArtifacts(ts, args[1], args[2], args[3], result.Artifacts)
 }
 
 func readPublishResult(ts *testscript.TestScript, path string) publish.ReleaseResult {
@@ -187,23 +186,41 @@ func assertPublishResult(
 	if !containsString(result.Aliases, alias) {
 		ts.Fatalf("publish result aliases = %v, want %q", result.Aliases, alias)
 	}
-	if len(result.Artifacts) != 1 {
-		ts.Fatalf("publish result artifacts length = %d, want 1", len(result.Artifacts))
+	if len(result.Artifacts) != 2 {
+		ts.Fatalf("publish result artifacts length = %d, want 2", len(result.Artifacts))
 	}
 
-	artifact := result.Artifacts[0]
-	if artifact.OperatingSystem != "incusos" || artifact.Architecture != "x86_64" ||
-		artifact.Format != imgsrv.ArtifactFormatRawGZ {
-		ts.Fatalf("publish result artifact = %+v, want incusos x86_64 raw.gz", artifact)
+	for _, wantVariant := range []string{"default", "secureboot"} {
+		artifact, ok := publishedArtifactByVariant(result.Artifacts, wantVariant)
+		if !ok {
+			ts.Fatalf("publish result artifacts missing variant %q: %+v", wantVariant, result.Artifacts)
+		}
+		if artifact.OperatingSystem != "incusos" || artifact.Architecture != "x86_64" ||
+			artifact.Format != imgsrv.ArtifactFormatRawGZ {
+			ts.Fatalf("publish result artifact = %+v, want incusos x86_64 raw.gz", artifact)
+		}
 	}
 }
 
-func verifyPublishedArtifact(
+func publishedArtifactByVariant(
+	artifacts []publish.PublishedReleaseArtifact,
+	variant string,
+) (publish.PublishedReleaseArtifact, bool) {
+	for _, artifact := range artifacts {
+		if artifact.Variant == variant {
+			return artifact, true
+		}
+	}
+
+	return publish.PublishedReleaseArtifact{}, false
+}
+
+func verifyPublishedArtifacts(
 	ts *testscript.TestScript,
 	image string,
 	publishedVersion string,
 	alias string,
-	artifactID string,
+	publishedArtifacts []publish.PublishedReleaseArtifact,
 ) {
 	env, ok := ts.Value(testscriptEnvKey{}).(*imgsrvtest.Env)
 	if !ok || env == nil {
@@ -222,13 +239,37 @@ func verifyPublishedArtifact(
 	if err != nil {
 		ts.Fatalf("resolve manifest: %v", err)
 	}
-	if len(manifest.Artifacts) != 1 {
-		ts.Fatalf("manifest artifacts length = %d, want 1", len(manifest.Artifacts))
+	if len(manifest.Artifacts) != len(publishedArtifacts) {
+		ts.Fatalf("manifest artifacts length = %d, want %d", len(manifest.Artifacts), len(publishedArtifacts))
 	}
-	artifact := manifest.Artifacts[0].Artifact
-	if artifact.ID.String() != artifactID {
-		ts.Fatalf("manifest artifact ID = %q, want %q", artifact.ID.String(), artifactID)
+
+	publishedByVariant := map[string]publish.PublishedReleaseArtifact{}
+	for _, artifact := range publishedArtifacts {
+		publishedByVariant[artifact.Variant] = artifact
 	}
+
+	for _, manifestArtifact := range manifest.Artifacts {
+		artifact := manifestArtifact.Artifact
+		published, ok := publishedByVariant[artifact.Variant]
+		if !ok {
+			ts.Fatalf("manifest artifact variant %q was not in publish result", artifact.Variant)
+		}
+		if artifact.ID.String() != published.ServerArtifactID {
+			ts.Fatalf("manifest artifact ID = %q, want %q", artifact.ID.String(), published.ServerArtifactID)
+		}
+		verifyArtifactDownload(ts, client, image, publishedVersion, published.ServerArtifactID)
+	}
+}
+
+func verifyArtifactDownload(
+	ts *testscript.TestScript,
+	client *imgsrv.Client,
+	image string,
+	publishedVersion string,
+	artifactID string,
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
 	download, err := client.Catalog().OpenArtifactDownload(
 		ctx,

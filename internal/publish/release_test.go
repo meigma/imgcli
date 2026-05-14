@@ -25,7 +25,7 @@ func TestPublisherPublishesReleaseAndAliases(t *testing.T) {
 	artifactPath := writePublishTestArtifact(t, "artifact.raw.gz", artifactBody)
 	events := []string{}
 
-	expectReadyUpload(t, uploads, artifactPath, int64(len(artifactBody)), "abc123", "application/gzip")
+	expectReadyUpload(t, uploads, artifactPath, int64(len(artifactBody)), "abc123")
 	catalog.EXPECT().
 		CreateImage(mock.Anything, imgsrv.CreateImageRequest{Name: "incusos"}).
 		Run(func(_ context.Context, _ imgsrv.CreateImageRequest) { events = append(events, "create-image") }).
@@ -40,6 +40,7 @@ func TestPublisherPublishesReleaseAndAliases(t *testing.T) {
 		Once()
 	catalog.EXPECT().
 		AddArtifact(mock.Anything, "incusos", "v1.0.0", imgsrv.AddArtifactRequest{
+			Variant:              "default",
 			OperatingSystem:      "incusos",
 			Architecture:         "x86_64",
 			Format:               imgsrv.ArtifactFormatRawGZ,
@@ -52,6 +53,7 @@ func TestPublisherPublishesReleaseAndAliases(t *testing.T) {
 		}).
 		Return(imgsrv.Artifact{
 			ID:                   "artifact-1",
+			Variant:              "default",
 			OperatingSystem:      "incusos",
 			Architecture:         "x86_64",
 			Format:               imgsrv.ArtifactFormatRawGZ,
@@ -63,7 +65,22 @@ func TestPublisherPublishesReleaseAndAliases(t *testing.T) {
 	catalog.EXPECT().
 		PublishVersion(mock.Anything, "incusos", "v1.0.0").
 		Run(func(_ context.Context, _ string, _ string) { events = append(events, "publish-version") }).
-		Return(imgsrv.ImageVersion{Version: "v1.0.0", State: imgsrv.ImageVersionStatePublished}, nil).
+		Return(imgsrv.PublishJob{
+			ID:        "publish-job-1",
+			ImageName: "incusos",
+			Version:   "v1.0.0",
+			State:     imgsrv.PublishJobStateQueued,
+		}, nil).
+		Once()
+	catalog.EXPECT().
+		GetPublishJob(mock.Anything, "publish-job-1").
+		Run(func(_ context.Context, _ string) { events = append(events, "get-publish-job") }).
+		Return(imgsrv.PublishJob{
+			ID:        "publish-job-1",
+			ImageName: "incusos",
+			Version:   "v1.0.0",
+			State:     imgsrv.PublishJobStateSucceeded,
+		}, nil).
 		Once()
 	catalog.EXPECT().
 		PutAlias(mock.Anything, "incusos", "latest", imgsrv.PutAliasRequest{Version: "v1.0.0"}).
@@ -113,9 +130,122 @@ func TestPublisherPublishesReleaseAndAliases(t *testing.T) {
 		"create-version",
 		"add-artifact",
 		"publish-version",
+		"get-publish-job",
 		"alias-latest",
 		"alias-prod",
 	}, events)
+}
+
+func TestPublisherPublishesMultipleArtifactVariants(t *testing.T) {
+	uploads := mocks.NewMockUploadsClient(t)
+	catalog := mocks.NewMockCatalogClient(t)
+	defaultBody := bytes.Repeat([]byte("a"), int(publish.MinPartSizeBytes))
+	secureBootBody := bytes.Repeat([]byte("b"), int(publish.MinPartSizeBytes))
+	defaultPath := writePublishTestArtifact(t, "default.raw.gz", defaultBody)
+	secureBootPath := writePublishTestArtifact(t, "secureboot.raw.gz", secureBootBody)
+	defaultArtifact := releaseTestArtifact(defaultPath, int64(len(defaultBody)))
+	secureBootArtifact := releaseTestArtifact(secureBootPath, int64(len(secureBootBody)))
+	secureBootArtifact.Key = "secureboot"
+	secureBootArtifact.Variant = "secureboot"
+	secureBootArtifact.Digest = "def456"
+
+	expectReadyUpload(t, uploads, defaultPath, int64(len(defaultBody)), "abc123")
+	expectReadyUpload(t, uploads, secureBootPath, int64(len(secureBootBody)), "def456")
+	catalog.EXPECT().
+		CreateImage(mock.Anything, imgsrv.CreateImageRequest{Name: "incusos"}).
+		Return(imgsrv.Image{Name: "incusos"}, nil).
+		Once()
+	catalog.EXPECT().
+		CreateDraftVersion(mock.Anything, "incusos", imgsrv.CreateDraftVersionRequest{Version: "v1.0.0"}).
+		Return(imgsrv.ImageVersion{Version: "v1.0.0", State: imgsrv.ImageVersionStateDraft}, nil).
+		Once()
+	catalog.EXPECT().
+		AddArtifact(mock.Anything, "incusos", "v1.0.0", imgsrv.AddArtifactRequest{
+			Variant:              "default",
+			OperatingSystem:      "incusos",
+			Architecture:         "x86_64",
+			Format:               imgsrv.ArtifactFormatRawGZ,
+			PrimaryBlobDigest:    "sha256:abc123",
+			PrimaryBlobSizeBytes: int64(len(defaultBody)),
+			PrimaryMediaType:     "application/gzip",
+		}).
+		Return(imgsrv.Artifact{
+			ID:                   "artifact-1",
+			Variant:              "default",
+			OperatingSystem:      "incusos",
+			Architecture:         "x86_64",
+			Format:               imgsrv.ArtifactFormatRawGZ,
+			PrimaryBlobDigest:    "sha256:abc123",
+			PrimaryBlobSizeBytes: int64(len(defaultBody)),
+			PrimaryMediaType:     "application/gzip",
+		}, nil).
+		Once()
+	catalog.EXPECT().
+		AddArtifact(mock.Anything, "incusos", "v1.0.0", imgsrv.AddArtifactRequest{
+			Variant:              "secureboot",
+			OperatingSystem:      "incusos",
+			Architecture:         "x86_64",
+			Format:               imgsrv.ArtifactFormatRawGZ,
+			PrimaryBlobDigest:    "sha256:def456",
+			PrimaryBlobSizeBytes: int64(len(secureBootBody)),
+			PrimaryMediaType:     "application/gzip",
+		}).
+		Return(imgsrv.Artifact{
+			ID:                   "artifact-2",
+			Variant:              "secureboot",
+			OperatingSystem:      "incusos",
+			Architecture:         "x86_64",
+			Format:               imgsrv.ArtifactFormatRawGZ,
+			PrimaryBlobDigest:    "sha256:def456",
+			PrimaryBlobSizeBytes: int64(len(secureBootBody)),
+			PrimaryMediaType:     "application/gzip",
+		}, nil).
+		Once()
+	expectPublishJob(catalog, "incusos", "v1.0.0")
+
+	publisher := newReleaseTestPublisher(t, catalog, uploads)
+	result, err := publisher.PublishRelease(context.Background(), publish.ReleaseRequest{
+		ImageName: "incusos",
+		Version:   "v1.0.0",
+		Artifacts: []publish.ReleaseArtifact{
+			defaultArtifact,
+			secureBootArtifact,
+		},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, publish.ReleaseResult{
+		Image:   "incusos",
+		Version: "v1.0.0",
+		State:   imgsrv.ImageVersionStatePublished,
+		Aliases: []string{},
+		Artifacts: []publish.PublishedReleaseArtifact{
+			{
+				ArtifactKey:      "root",
+				Variant:          "default",
+				LocalPath:        defaultPath,
+				ServerArtifactID: "artifact-1",
+				OperatingSystem:  "incusos",
+				Architecture:     "x86_64",
+				Format:           imgsrv.ArtifactFormatRawGZ,
+				Digest:           "sha256:abc123",
+				Size:             int64(len(defaultBody)),
+				MediaType:        "application/gzip",
+			},
+			{
+				ArtifactKey:      "secureboot",
+				Variant:          "secureboot",
+				LocalPath:        secureBootPath,
+				ServerArtifactID: "artifact-2",
+				OperatingSystem:  "incusos",
+				Architecture:     "x86_64",
+				Format:           imgsrv.ArtifactFormatRawGZ,
+				Digest:           "sha256:def456",
+				Size:             int64(len(secureBootBody)),
+				MediaType:        "application/gzip",
+			},
+		},
+	}, result)
 }
 
 func TestPublisherFailsOnDraftVersionConflict(t *testing.T) {
@@ -125,7 +255,7 @@ func TestPublisherFailsOnDraftVersionConflict(t *testing.T) {
 	artifactPath := writePublishTestArtifact(t, "artifact.raw.gz", artifactBody)
 	conflict := &imgsrv.ProblemError{HTTPStatus: http.StatusConflict, Title: "Conflict"}
 
-	expectReadyUpload(t, uploads, artifactPath, int64(len(artifactBody)), "abc123", "application/gzip")
+	expectReadyUpload(t, uploads, artifactPath, int64(len(artifactBody)), "abc123")
 	catalog.EXPECT().
 		CreateImage(mock.Anything, imgsrv.CreateImageRequest{Name: "incusos"}).
 		Return(imgsrv.Image{Name: "incusos"}, nil).
@@ -205,7 +335,7 @@ func TestPublisherSurfacesPartialAliasFailure(t *testing.T) {
 	artifactPath := writePublishTestArtifact(t, "artifact.raw.gz", artifactBody)
 	aliasErr := errors.New("policy denied")
 
-	expectReadyUpload(t, uploads, artifactPath, int64(len(artifactBody)), "abc123", "application/gzip")
+	expectReadyUpload(t, uploads, artifactPath, int64(len(artifactBody)), "abc123")
 	catalog.EXPECT().
 		CreateImage(mock.Anything, imgsrv.CreateImageRequest{Name: "incusos"}).
 		Return(imgsrv.Image{Name: "incusos"}, nil).
@@ -218,6 +348,7 @@ func TestPublisherSurfacesPartialAliasFailure(t *testing.T) {
 		AddArtifact(mock.Anything, "incusos", "v1.0.0", mock.Anything).
 		Return(imgsrv.Artifact{
 			ID:                   "artifact-1",
+			Variant:              "default",
 			OperatingSystem:      "incusos",
 			Architecture:         "x86_64",
 			Format:               imgsrv.ArtifactFormatRawGZ,
@@ -228,7 +359,21 @@ func TestPublisherSurfacesPartialAliasFailure(t *testing.T) {
 		Once()
 	catalog.EXPECT().
 		PublishVersion(mock.Anything, "incusos", "v1.0.0").
-		Return(imgsrv.ImageVersion{Version: "v1.0.0", State: imgsrv.ImageVersionStatePublished}, nil).
+		Return(imgsrv.PublishJob{
+			ID:        "publish-job-1",
+			ImageName: "incusos",
+			Version:   "v1.0.0",
+			State:     imgsrv.PublishJobStateQueued,
+		}, nil).
+		Once()
+	catalog.EXPECT().
+		GetPublishJob(mock.Anything, "publish-job-1").
+		Return(imgsrv.PublishJob{
+			ID:        "publish-job-1",
+			ImageName: "incusos",
+			Version:   "v1.0.0",
+			State:     imgsrv.PublishJobStateSucceeded,
+		}, nil).
 		Once()
 	catalog.EXPECT().
 		PutAlias(mock.Anything, "incusos", "latest", imgsrv.PutAliasRequest{Version: "v1.0.0"}).
@@ -263,11 +408,10 @@ func expectReadyUpload(
 	path string,
 	size int64,
 	sha256 string,
-	mediaType string,
 ) {
 	t.Helper()
 
-	mediaTypeHint := mediaType
+	mediaTypeHint := "application/gzip"
 	filenameHint := filepath.Base(path)
 	uploads.EXPECT().
 		BeginUpload(mock.Anything, imgsrv.BeginUploadRequest{
@@ -294,6 +438,27 @@ func releaseTestArtifact(path string, size int64) publish.ReleaseArtifact {
 	}
 }
 
+func expectPublishJob(catalog *mocks.MockCatalogClient, image string, version string) {
+	catalog.EXPECT().
+		PublishVersion(mock.Anything, image, version).
+		Return(imgsrv.PublishJob{
+			ID:        "publish-job-1",
+			ImageName: image,
+			Version:   version,
+			State:     imgsrv.PublishJobStateQueued,
+		}, nil).
+		Once()
+	catalog.EXPECT().
+		GetPublishJob(mock.Anything, "publish-job-1").
+		Return(imgsrv.PublishJob{
+			ID:        "publish-job-1",
+			ImageName: image,
+			Version:   version,
+			State:     imgsrv.PublishJobStateSucceeded,
+		}, nil).
+		Once()
+}
+
 func newReleaseTestPublisher(
 	t *testing.T,
 	catalog publish.CatalogClient,
@@ -307,7 +472,10 @@ func newReleaseTestPublisher(
 		Timeout:       time.Second,
 		PollInterval:  time.Nanosecond,
 	})
-	publisher, err := publish.NewPublisher(catalog, uploader)
+	publisher, err := publish.NewPublisher(catalog, uploader, publish.PublisherOptions{
+		Timeout:      time.Second,
+		PollInterval: time.Nanosecond,
+	})
 	require.NoError(t, err)
 	return publisher
 }
