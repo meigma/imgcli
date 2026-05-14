@@ -21,12 +21,175 @@ func TestProviderName(t *testing.T) {
 	assert.Equal(t, core.ProviderName("incusos"), provider.Name())
 }
 
-func TestProviderPlanPlaceholderOperation(t *testing.T) {
-	provider := New(Config{}, Options{})
+func TestProviderPlanResolvesArtifactFilenames(t *testing.T) {
+	tests := []struct {
+		name           string
+		artifact       core.ArtifactIntent
+		wantOutputPath func(outputDir string) string
+	}{
+		{
+			name: "uses configured artifact filename",
+			artifact: core.ArtifactIntent{
+				Architecture: core.Architecture("amd64"),
+				Format:       core.ArtifactFormat("raw.gz"),
+				Filename:     "custom/incusos-smoke.img.gz",
+				MediaType:    "application/gzip",
+				Labels:       map[string]string{"tier": "smoke"},
+				Annotations:  map[string]string{"note": "e2e"},
+			},
+			wantOutputPath: func(outputDir string) string {
+				return filepath.Join(outputDir, "custom", "incusos-smoke.img.gz")
+			},
+		},
+		{
+			name: "derives artifact filename when omitted",
+			artifact: core.ArtifactIntent{
+				Architecture: core.Architecture("amd64"),
+				Format:       core.ArtifactFormat("raw.gz"),
+			},
+			wantOutputPath: func(outputDir string) string {
+				return filepath.Join(outputDir, "test-image-default-amd64.raw.gz")
+			},
+		},
+	}
 
-	plan, err := provider.Plan(context.Background(), providers.PlanRequest{})
-	require.ErrorIs(t, err, ErrNotImplemented)
-	assert.Empty(t, plan)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outputDir := t.TempDir()
+			provider := New(configWithArtifact(tt.artifact), Options{})
+
+			plan, err := provider.Plan(context.Background(), providers.PlanRequest{
+				Image:     core.Image{Name: core.Name("test-image")},
+				OutputDir: outputDir,
+			})
+
+			require.NoError(t, err)
+			assert.Equal(t, providerName, plan.Provider)
+			assert.Equal(t, core.Image{Name: core.Name("test-image")}, plan.Image)
+			assert.Equal(t, outputDir, plan.OutputDir)
+			require.Len(t, plan.Artifacts, 1)
+			assert.Equal(t, providers.ArtifactPlan{
+				Key:             core.ArtifactKey("default"),
+				Variant:         core.VariantName("default"),
+				Architecture:    tt.artifact.Architecture,
+				OperatingSystem: "incusos",
+				Format:          tt.artifact.Format,
+				MediaType:       artifactMediaType(tt.artifact),
+				OutputPath:      tt.wantOutputPath(outputDir),
+				Labels:          tt.artifact.Labels,
+				Annotations:     tt.artifact.Annotations,
+			}, plan.Artifacts[0])
+		})
+	}
+}
+
+func TestProviderPlanCreatesMultipleVariantsInStableOrder(t *testing.T) {
+	outputDir := t.TempDir()
+	provider := New(multiVariantConfig(), Options{})
+
+	plan, err := provider.Plan(context.Background(), providers.PlanRequest{
+		Image:     core.Image{Name: core.Name("test-image")},
+		OutputDir: outputDir,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, []providers.ArtifactPlan{
+		{
+			Key:             core.ArtifactKey("default"),
+			Variant:         core.VariantName("default"),
+			Architecture:    core.Architecture("amd64"),
+			OperatingSystem: "incusos",
+			Format:          core.ArtifactFormat("raw.gz"),
+			MediaType:       "application/gzip",
+			OutputPath:      filepath.Join(outputDir, "test-image-default-amd64.raw.gz"),
+		},
+		{
+			Key:             core.ArtifactKey("secureboot"),
+			Variant:         core.VariantName("secureboot"),
+			Architecture:    core.Architecture("amd64"),
+			OperatingSystem: "incusos",
+			Format:          core.ArtifactFormat("raw.gz"),
+			MediaType:       "application/gzip",
+			OutputPath:      filepath.Join(outputDir, "test-image-secureboot-amd64.raw.gz"),
+		},
+	}, plan.Artifacts)
+}
+
+func TestProviderPlanErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  Config
+		wantErr string
+	}{
+		{
+			name: "zero variants",
+			config: Config{
+				Variants: map[core.VariantName]incusosschema.Variant{},
+			},
+			wantErr: "incusos build requires at least one variant",
+		},
+		{
+			name:    "unsupported format",
+			config:  configWithVariant(core.ArtifactFormat("iso")),
+			wantErr: `unsupported incusos artifact format "iso"`,
+		},
+		{
+			name: "duplicate output paths",
+			config: Config{
+				Seed: &incusosschema.Seed{},
+				Variants: map[core.VariantName]incusosschema.Variant{
+					"default": {
+						Artifact: core.ArtifactIntent{
+							Architecture: core.Architecture("amd64"),
+							Format:       core.ArtifactFormat("raw.gz"),
+							Filename:     "same.img.gz",
+						},
+					},
+					"secureboot": {
+						Artifact: core.ArtifactIntent{
+							Architecture: core.Architecture("amd64"),
+							Format:       core.ArtifactFormat("raw.gz"),
+							Filename:     "same.img.gz",
+						},
+					},
+				},
+			},
+			wantErr: "incusos artifact output path",
+		},
+		{
+			name: "absolute artifact filename",
+			config: configWithArtifact(core.ArtifactIntent{
+				Architecture: core.Architecture("amd64"),
+				Format:       core.ArtifactFormat("raw"),
+				Filename:     "/tmp/out.img",
+			}),
+			wantErr: `incusos artifact filename must be relative`,
+		},
+		{
+			name: "escaping artifact filename",
+			config: configWithArtifact(core.ArtifactIntent{
+				Architecture: core.Architecture("amd64"),
+				Format:       core.ArtifactFormat("raw"),
+				Filename:     "../out.img",
+			}),
+			wantErr: `incusos artifact filename must stay within output directory`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := New(tt.config, Options{})
+
+			plan, err := provider.Plan(context.Background(), providers.PlanRequest{
+				Image:     core.Image{Name: core.Name("test-image")},
+				OutputDir: t.TempDir(),
+			})
+
+			require.Error(t, err)
+			require.ErrorContains(t, err, tt.wantErr)
+			assert.Empty(t, plan)
+		})
+	}
 }
 
 func TestProviderBuildCreatesCustomizedImage(t *testing.T) {

@@ -104,14 +104,12 @@ func TestInvalidLogSettings(t *testing.T) {
 
 func TestBaseCommands(t *testing.T) {
 	tests := []struct {
-		name        string
-		command     string
-		placeholder bool
+		name    string
+		command string
 	}{
 		{
-			name:        "plan",
-			command:     "plan",
-			placeholder: true,
+			name:    "plan",
+			command: "plan",
 		},
 		{
 			name:    "build",
@@ -144,22 +142,155 @@ func TestBaseCommands(t *testing.T) {
 			assert.Empty(t, result.stdout)
 			assert.Empty(t, result.stderr)
 		})
-
-		if !tt.placeholder {
-			continue
-		}
-
-		t.Run(tt.name+" returns placeholder error", func(t *testing.T) {
-			clearIMGCLIEnv(t)
-
-			result := executeCommand(t, Options{}, tt.command, "image.cue")
-
-			require.Error(t, result.err)
-			require.ErrorContains(t, result.err, tt.command+" command is not implemented yet")
-			assert.Empty(t, result.stdout)
-			assert.Empty(t, result.stderr)
-		})
 	}
+}
+
+func TestPlanCommand(t *testing.T) {
+	t.Run("prints resolved IncusOS artifact plan", func(t *testing.T) {
+		clearIMGCLIEnv(t)
+		outputDir := filepath.Join(t.TempDir(), "out")
+		cacheDir := filepath.Join(t.TempDir(), "cache")
+		configPath := writeImageConfig(t, `
+apiVersion: "imgcli.meigma.io/v0alpha1"
+kind:       "ImagePlan"
+image: {
+	name:        "test-image"
+	description: "test image"
+}
+output: dir: "`+outputDir+`"
+incusos: {
+	defaults: source: channel: "testing"
+	seed: install: {}
+	variants: {
+		secureboot: artifact: {
+			architecture: "amd64"
+			format:       "raw.gz"
+			filename:     "custom/secureboot.img.gz"
+		}
+		default: artifact: {
+			architecture: "amd64"
+			format:       "raw.gz"
+			labels: tier: "smoke"
+			annotations: note: "planned"
+		}
+	}
+}
+`)
+
+		result := executeCommand(t, Options{}, "--cache-dir", cacheDir, "plan", configPath)
+
+		require.NoError(t, result.err)
+		assert.Empty(t, result.stderr)
+		assert.NoDirExists(t, cacheDir)
+		var plan core.ResolvedPlan
+		require.NoError(t, json.Unmarshal([]byte(result.stdout), &plan))
+		assert.Equal(t, core.ResolvedPlan{
+			Image: core.Image{
+				Name:        core.Name("test-image"),
+				Description: "test image",
+			},
+			OutputDir: outputDir,
+			Artifacts: map[core.ArtifactKey]core.ResolvedArtifact{
+				"default": {
+					ArtifactKey:  core.ArtifactKey("default"),
+					ImageName:    "test-image",
+					Variant:      core.VariantName("default"),
+					Provider:     core.ProviderName("incusos"),
+					Os:           "incusos",
+					Architecture: core.Architecture("amd64"),
+					Format:       core.ArtifactFormat("raw.gz"),
+					MediaType:    "application/gzip",
+					Path:         filepath.Join(outputDir, "test-image-default-amd64.raw.gz"),
+					Labels:       map[string]string{"tier": "smoke"},
+					Annotations:  map[string]string{"note": "planned"},
+				},
+				"secureboot": {
+					ArtifactKey:  core.ArtifactKey("secureboot"),
+					ImageName:    "test-image",
+					Variant:      core.VariantName("secureboot"),
+					Provider:     core.ProviderName("incusos"),
+					Os:           "incusos",
+					Architecture: core.Architecture("amd64"),
+					Format:       core.ArtifactFormat("raw.gz"),
+					MediaType:    "application/gzip",
+					Path:         filepath.Join(outputDir, "custom", "secureboot.img.gz"),
+				},
+			},
+		}, plan)
+	})
+
+	t.Run("does not require publish configuration", func(t *testing.T) {
+		clearIMGCLIEnv(t)
+		t.Setenv("IMGCLI_PUBLISH_PART_SIZE", "1MB")
+		configPath := writeImageConfig(t, `
+apiVersion: "imgcli.meigma.io/v0alpha1"
+kind:       "ImagePlan"
+image: name: "test-image"
+incusos: variants: default: artifact: {
+	architecture: "amd64"
+	format:       "raw.gz"
+}
+`)
+
+		result := executeCommand(t, Options{}, "plan", configPath)
+
+		require.NoError(t, result.err)
+		assert.Empty(t, result.stderr)
+		assert.NotEmpty(t, result.stdout)
+	})
+
+	t.Run("missing provider fails explicitly", func(t *testing.T) {
+		clearIMGCLIEnv(t)
+		configPath := writeImageConfig(t, `
+apiVersion: "imgcli.meigma.io/v0alpha1"
+kind:       "ImagePlan"
+image: name: "test-image"
+`)
+
+		result := executeCommand(t, Options{}, "plan", configPath)
+
+		require.Error(t, result.err)
+		require.ErrorContains(t, result.err, "must specify provider incusos")
+		assert.Empty(t, result.stdout)
+		assert.Empty(t, result.stderr)
+	})
+
+	t.Run("unsupported provider fails explicitly", func(t *testing.T) {
+		clearIMGCLIEnv(t)
+		configPath := writeImageConfig(t, `
+apiVersion: "imgcli.meigma.io/v0alpha1"
+kind:       "ImagePlan"
+image: name: "test-image"
+talos: {}
+`)
+
+		result := executeCommand(t, Options{}, "plan", configPath)
+
+		require.Error(t, result.err)
+		require.ErrorContains(t, result.err, `unsupported provider "talos": only incusos is supported`)
+		assert.Empty(t, result.stdout)
+		assert.Empty(t, result.stderr)
+	})
+
+	t.Run("provider planning errors fail before build adapters", func(t *testing.T) {
+		clearIMGCLIEnv(t)
+		configPath := writeImageConfig(t, `
+apiVersion: "imgcli.meigma.io/v0alpha1"
+kind:       "ImagePlan"
+image: name: "test-image"
+incusos: variants: default: artifact: {
+	architecture: "amd64"
+	format:       "iso"
+}
+`)
+
+		result := executeCommand(t, Options{}, "plan", configPath)
+
+		require.Error(t, result.err)
+		require.ErrorContains(t, result.err, `unsupported incusos artifact format "iso"`)
+		assert.Empty(t, result.stdout)
+		assert.Empty(t, result.stderr)
+	})
 }
 
 func TestBuildCommand(t *testing.T) {
